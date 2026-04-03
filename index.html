@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="SafeZone — Real-time area safety monitoring with emergency services, CCTV tracking, and time-based risk analysis.">
+  <title>SafeZone — Area Safety Monitor</title>
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+  <!-- App Styles -->
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="edge-ai.css" />
+</head>
+<body>
+
+  <!-- Loading Overlay -->
+  <div id="loadingOverlay" class="loading-overlay">
+    <div class="loading-spinner"></div>
+    <div class="loading-text">Initializing SafeZone</div>
+  </div>
+
+  <!-- Brand -->
+  <div class="brand">
+    <div class="brand-icon">🛡️</div>
+    <span class="brand-name">SafeZone</span>
+  </div>
+
+  <!-- Search Bar -->
+  <div class="search-container">
+    <div class="search-bar">
+      <span class="search-icon">🔍</span>
+      <input 
+        type="text" 
+        id="searchInput" 
+        placeholder="Search any location..." 
+        onkeydown="onSearchKeydown(event)"
+        autocomplete="off"
+      />
+      <button class="search-btn" onclick="searchLocation()">Search</button>
+    </div>
+  </div>
+
+  <!-- Layer Controls -->
+  <div class="layer-controls" role="toolbar" aria-label="Map layer controls">
+    <button class="layer-btn active" data-layer="heatmap" onclick="toggleLayer('heatmap')" aria-pressed="true" aria-label="Toggle heatmap layer">
+      <span class="dot"></span>
+      <span>Heatmap</span>
+    </button>
+    <button class="layer-btn active" data-layer="cameras" onclick="toggleLayer('cameras')" aria-pressed="true" aria-label="Toggle cameras layer">
+      <span class="dot"></span>
+      <span>Cameras</span>
+    </button>
+    <button class="layer-btn active" data-layer="emergency" onclick="toggleLayer('emergency')" aria-pressed="true" aria-label="Toggle emergency services layer">
+      <span class="dot"></span>
+      <span>Emergency</span>
+    </button>
+  </div>
+
+  <!-- Legend -->
+  <div class="legend" role="region" aria-label="Safety level legend">
+    <div class="legend-title">Safety Level</div>
+    <div class="legend-item"><div class="legend-color" style="background: #22c55e;"></div> Very Safe (80-100)</div>
+    <div class="legend-item"><div class="legend-color" style="background: #eab308;"></div> Moderate (60-79)</div>
+    <div class="legend-item"><div class="legend-color" style="background: #f97316;"></div> Use Caution (40-59)</div>
+    <div class="legend-item"><div class="legend-color" style="background: #ef4444;"></div> High Risk (0-39)</div>
+    <div class="legend-note">Note: Heatmap shows estimated risk patterns, not actual crime data</div>
+  </div>
+
+  <!-- Map -->
+  <div id="map"></div>
+
+  <!-- Sidebar -->
+  <div id="sidebar" class="sidebar" role="complementary" aria-label="Safety report panel">
+    <div class="sidebar-header">
+      <h2>Area Safety Report</h2>
+      <button class="close-btn" onclick="closeSidebar()" aria-label="Close safety report">✕</button>
+    </div>
+    <div class="sidebar-body" id="sidebarContent">
+      <p style="text-align: center; color: var(--text-muted); padding: 40px 0;">
+        Click anywhere on the map to get a safety report for that location.
+      </p>
+    </div>
+  </div>
+
+  <!-- Time Control -->
+  <div class="time-control">
+    <div class="time-header">
+      <span class="time-label">Time Analysis</span>
+      <span class="time-value" id="timeDisplay">--</span>
+    </div>
+    <input 
+      type="range" 
+      id="timeSlider" 
+      class="time-slider" 
+      min="0" 
+      max="23" 
+      value="12" 
+      oninput="onTimeChange(this.value)"
+    />
+    <div class="time-marks">
+      <span>12 AM</span>
+      <span>6 AM</span>
+      <span>12 PM</span>
+      <span>6 PM</span>
+      <span>11 PM</span>
+    </div>
+  </div>
+
+  <!-- Edge AI Guardian Tab -->
+  <div class="edge-ai-panel">
+    <button id="edgeAIBtn" class="edge-ai-btn" onclick="toggleEdgeAI()" aria-label="Toggle Edge AI Sensor Fusion">
+      🛡️ Enable Edge AI
+    </button>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- Leaflet Heat Plugin -->
+  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+  <!-- App Scripts -->
+  <script src="edge-ai.js"></script>
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+
+</body>
+</html>

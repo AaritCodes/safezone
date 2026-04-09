@@ -563,6 +563,55 @@ function getHeatmapData(hour, center = MAP_CENTER, span = 0.05) {
   return points;
 }
 
+// ── Mock Broker API (Real Estate Integration) ───────────────────
+async function fetchNearbyProperties(lat, lng, radius = 2000) {
+  // Simulate network delay for authenticity
+  await new Promise(r => setTimeout(r, 600 + Math.random() * 800));
+  
+  const properties = [];
+  const numProps = 5 + Math.floor(Math.random() * 6); // 5 to 10 properties
+
+  const propertyTypes = ['House', 'Apartment', 'Condo', 'Townhouse'];
+  const listingTypes = ['For Sale', 'For Rent'];
+  
+  for (let i = 0; i < numProps; i++) {
+    const listType = listingTypes[Math.floor(Math.random() * listingTypes.length)];
+    const propType = propertyTypes[Math.floor(Math.random() * propertyTypes.length)];
+    const beds = 1 + Math.floor(Math.random() * 4);
+    const baths = 1 + Math.floor(Math.random() * 3);
+    
+    let price;
+    if (listType === 'For Sale') {
+      price = 150000 + Math.floor(Math.random() * 850000);
+      price = `$${price.toLocaleString()}`;
+    } else {
+      price = 900 + Math.floor(Math.random() * 3000);
+      price = `$${price.toLocaleString()}/mo`;
+    }
+
+    properties.push({
+      id: `prop_${Math.random().toString(36).substr(2, 9)}`,
+      lat: lat + (Math.random() - 0.5) * (radius / 55000), // Approximate offset
+      lng: lng + (Math.random() - 0.5) * (radius / 55000),
+      title: `${beds} Bed ${propType} ${listType}`,
+      price: price,
+      beds: beds,
+      baths: baths,
+      sqft: 600 + Math.floor(Math.random() * 2000),
+      type: listType,
+      distance: Math.round(Math.random() * radius),
+      image: `https://images.unsplash.com/photo-${[
+        '1512917774080-9991f1c4c750', '1600596542815-ffad4c1539a9', '1564013799919-ab600027ffc6',
+        '1522708323590-d24dbb6b0267', '1580587771525-78b9dba3b914', '1449844908441-8829872d2607'
+      ][Math.floor(Math.random() * 6)]}?auto=format&fit=crop&w=300&q=80`
+    });
+  }
+  
+  // Sort by distance roughly
+  properties.sort((a, b) => a.distance - b.distance);
+  return properties;
+}
+
 // ── Utility Functions ─────────────────────────────────────────
 function getDistance(lat1, lng1, lat2, lng2) {
   const R = 6371000;

@@ -183,6 +183,39 @@ html, body {
   transform: scale(1.03);
 }
 
+/* ── SafeHome Finder ───────────────────────────────────────── */
+.safehome-panel {
+  position: fixed;
+  top: 110px;
+  right: 20px;
+  z-index: 1000;
+  animation: slideDown 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.1s both;
+}
+
+.safehome-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 20px;
+  background: linear-gradient(135deg, var(--bg-glass), rgba(17, 24, 39, 0.95));
+  backdrop-filter: blur(24px);
+  border: 1px solid var(--accent);
+  border-radius: 60px;
+  color: var(--text-primary);
+  font-family: var(--font);
+  font-size: 14px;
+  font-weight: 700;
+  box-shadow: 0 4px 16px var(--accent-glow);
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.safehome-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
+  background: linear-gradient(135deg, rgba(30, 36, 51, 0.95), var(--accent));
+}
+
 /* ── Sidebar ───────────────────────────────────────────────── */
 .sidebar {
   position: fixed;
@@ -767,6 +800,12 @@ html, body {
   border: 2px solid rgba(255,255,255,0.3);
 }
 
+.marker-property {
+  background: linear-gradient(135deg, #10b981, #059669); /* Teal/Emerald */
+  border: 2px solid rgba(255,255,255,0.8);
+  font-size: 14px;
+}
+
 .marker-selected {
   background: linear-gradient(135deg, var(--accent), var(--accent-light));
   border: 3px solid rgba(255,255,255,0.5);
@@ -798,6 +837,9 @@ html, body {
   display: inline-block;
   margin-bottom: 8px;
 }
+
+.popup-type.buy { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+.popup-type.rent { background: rgba(56, 189, 248, 0.2); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.3); }
 
 .popup-type.police {
   background: rgba(99, 102, 241, 0.15);

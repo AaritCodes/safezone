@@ -56,6 +56,10 @@
       <span class="dot"></span>
       <span>Emergency</span>
     </button>
+    <button class="layer-btn active" data-layer="properties" onclick="toggleLayer('properties')" aria-pressed="true" aria-label="Toggle real estate properties layer">
+      <span class="dot"></span>
+      <span>Properties</span>
+    </button>
   </div>
 
   <!-- Legend -->
@@ -106,6 +110,13 @@
       <span>6 PM</span>
       <span>11 PM</span>
     </div>
+  </div>
+
+  <!-- SafeHome Finder -->
+  <div class="safehome-panel">
+    <button id="findSafeHomesBtn" class="safehome-btn" onclick="findSafestHomes()" aria-label="Find Safest Homes Nearby">
+      🏠 Find Safest Homes
+    </button>
   </div>
 
   <!-- Edge AI Guardian Tab -->

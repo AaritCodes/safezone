@@ -3,16 +3,74 @@
 // ============================================================
 
 let map, heatLayer, selectedMarker;
-let emergencyLayerGroup, cameraLayerGroup;
+let emergencyLayerGroup, cameraLayerGroup, propertiesLayerGroup;
 let currentHour = new Date().getHours();
-let layerState = { heatmap: true, cameras: true, emergency: true };
+let layerState = { heatmap: true, cameras: true, emergency: true, properties: true };
 let currentMapCenter = MAP_CENTER;
 let lastFetchedServices = null;
 let lastFetchedCameras = [];
+let lastFetchedProperties = [];
 let lastAreaInfo = null;
 let isFetching = false;
 let hasApiErrors = false;
 let favoriteLocations = JSON.parse(localStorage.getItem('safezoneFavorites') || '[]');
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function toFiniteNumber(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizeServiceType(type) {
+  const normalized = String(type || '').toLowerCase();
+  if (normalized === 'hospital') return 'hospital';
+  if (normalized === 'fire' || normalized === 'fire_station') return 'fire';
+  return 'police';
+}
+
+function sanitizeUrl(url) {
+  try {
+    const parsed = new URL(String(url || ''), window.location.href);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.href;
+  } catch (err) {
+    console.warn('Invalid URL provided:', err);
+  }
+  return 'about:blank';
+}
+
+function nearestDistance(items, lat, lng) {
+  if (!Array.isArray(items) || items.length === 0) return Infinity;
+  let nearest = Infinity;
+
+  items.forEach(item => {
+    const itemLat = toFiniteNumber(item.lat, NaN);
+    const itemLng = toFiniteNumber(item.lng, NaN);
+    if (!Number.isFinite(itemLat) || !Number.isFinite(itemLng)) return;
+    const dist = getDistance(lat, lng, itemLat, itemLng);
+    if (dist < nearest) nearest = dist;
+  });
+
+  return nearest;
+}
+
+function countNearbyActiveCameras(cameras, lat, lng, radius = 350) {
+  if (!Array.isArray(cameras) || cameras.length === 0) return 0;
+  return cameras.filter(cam => {
+    const camLat = toFiniteNumber(cam.lat, NaN);
+    const camLng = toFiniteNumber(cam.lng, NaN);
+    if (!Number.isFinite(camLat) || !Number.isFinite(camLng)) return false;
+    if (String(cam.status || '').toLowerCase() !== 'active') return false;
+    return getDistance(lat, lng, camLat, camLng) <= radius;
+  }).length;
+}
 
 // ── Initialize Map ────────────────────────────────────────────
 function initMap() {
@@ -36,6 +94,7 @@ function initMap() {
   // Initialize empty layer groups
   emergencyLayerGroup = L.layerGroup().addTo(map);
   cameraLayerGroup = L.layerGroup().addTo(map);
+  propertiesLayerGroup = L.layerGroup().addTo(map);
 
   // Heatmap
   initHeatmap();
@@ -70,10 +129,11 @@ async function loadAreaData(lat, lng) {
   showStatus('Scanning area...');
 
   try {
-    // Fetch services, cameras, and area info in parallel
-    const [services, cameras, areaInfo] = await Promise.all([
+    // Fetch services, cameras, properties, and area info in parallel
+    const [services, cameras, properties, areaInfo] = await Promise.all([
       fetchNearbyAmenities(lat, lng, 3000),
       fetchNearbyCameras(lat, lng, 2000),
+      fetchNearbyProperties(lat, lng, 2000),
       reverseGeocode(lat, lng)
     ]);
 
@@ -85,12 +145,14 @@ async function loadAreaData(lat, lng) {
 
     lastFetchedServices = services;
     lastFetchedCameras = Array.isArray(cameras) ? cameras : (cameras.cameras || []);
+    lastFetchedProperties = properties;
     lastAreaInfo = areaInfo;
     currentMapCenter = [lat, lng];
 
     // Update map markers
     updateEmergencyMarkers(services);
     updateCameraMarkers(lastFetchedCameras);
+    updatePropertyMarkers(lastFetchedProperties);
     updateHeatmap();
 
     showStatus('');
@@ -172,17 +234,27 @@ function updateHeatmap() {
 function updateEmergencyMarkers(services) {
   emergencyLayerGroup.clearLayers();
 
+  const safeServices = services || {};
+  const policeServices = Array.isArray(safeServices.police) ? safeServices.police : [];
+  const hospitalServices = Array.isArray(safeServices.hospital) ? safeServices.hospital : [];
+  const fireServices = Array.isArray(safeServices.fire) ? safeServices.fire : [];
+
   const allServices = [
-    ...services.police,
-    ...services.hospital,
-    ...services.fire
+    ...policeServices,
+    ...hospitalServices,
+    ...fireServices
   ];
 
   allServices.forEach(service => {
-    const iconClass = service.type === 'police' ? 'marker-police' :
-                      service.type === 'hospital' ? 'marker-hospital' : 'marker-fire';
-    const emoji = service.type === 'police' ? '🚔' :
-                  service.type === 'hospital' ? '🏥' : '🚒';
+    const safeType = normalizeServiceType(service.type);
+    const lat = toFiniteNumber(service.lat, NaN);
+    const lng = toFiniteNumber(service.lng, NaN);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+    const iconClass = safeType === 'police' ? 'marker-police' :
+                      safeType === 'hospital' ? 'marker-hospital' : 'marker-fire';
+    const emoji = safeType === 'police' ? '🚔' :
+                  safeType === 'hospital' ? '🏥' : '🚒';
 
     const icon = L.divIcon({
       html: `<div class="custom-marker ${iconClass}">${emoji}</div>`,
@@ -191,8 +263,8 @@ function updateEmergencyMarkers(services) {
       iconAnchor: [18, 18]
     });
 
-    const marker = L.marker([service.lat, service.lng], { icon })
-      .bindPopup(createServicePopup(service));
+    const marker = L.marker([lat, lng], { icon })
+      .bindPopup(createServicePopup({ ...service, type: safeType, lat, lng }));
 
     emergencyLayerGroup.addLayer(marker);
   });
@@ -201,18 +273,23 @@ function updateEmergencyMarkers(services) {
 }
 
 function createServicePopup(service) {
-  const typeLabel = service.type.charAt(0).toUpperCase() + service.type.slice(1);
+  const safeType = normalizeServiceType(service.type);
+  const typeLabel = safeType.charAt(0).toUpperCase() + safeType.slice(1);
+  const safeName = escapeHtml(service.name || `${typeLabel} Service`);
+  const safeAddress = service.address ? escapeHtml(service.address) : '';
+  const safePhone = escapeHtml(service.phone || 'N/A');
+  const safeDistance = formatDistance(Math.max(0, Math.round(toFiniteNumber(service.distance, 0))));
   const sourceTag = service.source === 'openstreetmap'
     ? '<div style="font-size:10px;color:#64748b;margin-top:6px;">📡 Verified via OpenStreetMap</div>'
     : '<div style="font-size:10px;color:#eab308;margin-top:6px;">⚠ Estimated location</div>';
 
   return `
     <div>
-      <div class="popup-title">${service.name}</div>
-      <span class="popup-type ${service.type}">${typeLabel}</span>
-      ${service.address ? `<div class="popup-row"><span class="label">📍 Addr</span> ${service.address}</div>` : ''}
-      <div class="popup-row"><span class="label">📞 Phone</span> <strong>${service.phone}</strong></div>
-      <div class="popup-row"><span class="label">📏 Dist</span> ${formatDistance(service.distance)}</div>
+      <div class="popup-title">${safeName}</div>
+      <span class="popup-type ${safeType}">${typeLabel}</span>
+      ${safeAddress ? `<div class="popup-row"><span class="label">📍 Addr</span> ${safeAddress}</div>` : ''}
+      <div class="popup-row"><span class="label">📞 Phone</span> <strong>${safePhone}</strong></div>
+      <div class="popup-row"><span class="label">📏 Dist</span> ${safeDistance}</div>
       ${sourceTag}
     </div>
   `;
@@ -225,20 +302,27 @@ function updateCameraMarkers(cameras) {
   const cameraArray = Array.isArray(cameras) ? cameras : (cameras.cameras || []);
 
   cameraArray.forEach(cam => {
+    const lat = toFiniteNumber(cam.lat, NaN);
+    const lng = toFiniteNumber(cam.lng, NaN);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+    const isActive = String(cam.status || '').toLowerCase() === 'active';
+    const coverage = Math.max(50, Math.round(toFiniteNumber(cam.coverage, 120)));
+
     const icon = L.divIcon({
-      html: `<div class="custom-marker marker-camera" style="opacity: ${cam.status === 'active' ? '1' : '0.5'}" role="img" aria-label="CCTV Camera">📹</div>`,
+      html: `<div class="custom-marker marker-camera" style="opacity: ${isActive ? '1' : '0.5'}" role="img" aria-label="CCTV Camera">📹</div>`,
       className: '',
       iconSize: [24, 24],
       iconAnchor: [12, 12]
     });
 
-    const marker = L.marker([cam.lat, cam.lng], { icon })
-      .bindPopup(createCameraPopup(cam));
+    const marker = L.marker([lat, lng], { icon })
+      .bindPopup(createCameraPopup({ ...cam, lat, lng, status: isActive ? 'active' : 'maintenance', coverage }));
 
-    const circle = L.circle([cam.lat, cam.lng], {
-      radius: cam.coverage,
-      color: cam.status === 'active' ? 'rgba(34, 197, 94, 0.3)' : 'rgba(234, 179, 8, 0.3)',
-      fillColor: cam.status === 'active' ? 'rgba(34, 197, 94, 0.08)' : 'rgba(234, 179, 8, 0.08)',
+    const circle = L.circle([lat, lng], {
+      radius: coverage,
+      color: isActive ? 'rgba(34, 197, 94, 0.3)' : 'rgba(234, 179, 8, 0.3)',
+      fillColor: isActive ? 'rgba(34, 197, 94, 0.08)' : 'rgba(234, 179, 8, 0.08)',
       fillOpacity: 1, weight: 1
     });
 
@@ -250,18 +334,73 @@ function updateCameraMarkers(cameras) {
 }
 
 function createCameraPopup(cam) {
-  const statusColor = cam.status === 'active' ? '#22c55e' : '#eab308';
+  const isActive = String(cam.status || '').toLowerCase() === 'active';
+  const statusColor = isActive ? '#22c55e' : '#eab308';
+  const safeName = escapeHtml(cam.name || 'CCTV Camera');
+  const safeResolution = escapeHtml(cam.resolution || 'Unknown');
+  const safeCoverage = Math.max(50, Math.round(toFiniteNumber(cam.coverage, 120)));
   const sourceTag = cam.source === 'openstreetmap'
     ? '<div style="font-size:10px;color:#64748b;margin-top:4px;">📡 Verified via OpenStreetMap</div>'
     : '<div style="font-size:10px;color:#eab308;margin-top:4px;">⚠ Estimated</div>';
   return `
     <div>
-      <div class="popup-title">${cam.name}</div>
-      <span class="popup-type camera">${cam.status.toUpperCase()}</span>
-      <div class="popup-row"><span class="label">📐 Range</span> ${cam.coverage}m radius</div>
-      <div class="popup-row"><span class="label">🎥 Quality</span> ${cam.resolution}</div>
-      <div class="popup-row"><span class="label">⚡ Status</span> <span style="color: ${statusColor}">${cam.status === 'active' ? '● Online' : '● Maintenance'}</span></div>
+      <div class="popup-title">${safeName}</div>
+      <span class="popup-type camera">${isActive ? 'ACTIVE' : 'MAINTENANCE'}</span>
+      <div class="popup-row"><span class="label">📐 Range</span> ${safeCoverage}m radius</div>
+      <div class="popup-row"><span class="label">🎥 Quality</span> ${safeResolution}</div>
+      <div class="popup-row"><span class="label">⚡ Status</span> <span style="color: ${statusColor}">${isActive ? '● Online' : '● Maintenance'}</span></div>
       ${sourceTag}
+    </div>
+  `;
+}
+
+// ── Property Markers (Broker API) ─────────────────────────────
+function updatePropertyMarkers(properties) {
+  propertiesLayerGroup.clearLayers();
+  
+  properties.forEach(prop => {
+    const lat = toFiniteNumber(prop.lat, NaN);
+    const lng = toFiniteNumber(prop.lng, NaN);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+    const icon = L.divIcon({
+      html: `<div class="custom-marker marker-property" role="img" aria-label="Property">🏠</div>`,
+      className: '',
+      iconSize: [28, 28],
+      iconAnchor: [14, 14]
+    });
+
+    const marker = L.marker([lat, lng], { icon })
+      .bindPopup(createPropertyPopup({ ...prop, lat, lng }));
+
+    marker.on('click', () => {
+      onMapClick({ latlng: { lat, lng } });
+    });
+
+    propertiesLayerGroup.addLayer(marker);
+  });
+
+  if (!layerState.properties) map.removeLayer(propertiesLayerGroup);
+}
+
+function createPropertyPopup(prop) {
+  const safeImage = sanitizeUrl(prop.image);
+  const safeTitle = escapeHtml(prop.title || 'Property Listing');
+  const listingType = prop.type === 'For Sale' ? 'For Sale' : 'For Rent';
+  const safePrice = escapeHtml(prop.price || 'N/A');
+  const beds = Math.max(0, Math.round(toFiniteNumber(prop.beds, 0)));
+  const baths = Math.max(0, Math.round(toFiniteNumber(prop.baths, 0)));
+  const sqft = Math.max(0, Math.round(toFiniteNumber(prop.sqft, 0)));
+
+  return `
+    <div style="min-width: 200px;">
+      <img src="${safeImage}" alt="Property" referrerpolicy="no-referrer" style="width: 100%; height: 120px; object-fit: cover; border-radius: 8px 8px 0 0; margin: -14px -14px 10px -14px; width: calc(100% + 28px); max-width: none;">
+      <div class="popup-title">${safeTitle}</div>
+      <span class="popup-type ${listingType === 'For Sale' ? 'police' : 'hospital'}">${listingType}</span>
+      <div style="font-size: 16px; font-weight: bold; color: var(--accent-light); margin: 6px 0;">${safePrice}</div>
+      <div class="popup-row">🛏️ ${beds} Beds | 🛁 ${baths} Baths</div>
+      <div class="popup-row">📐 ${sqft} sqft</div>
+      <div style="font-size:10px;color:#64748b;margin-top:6px;">Broker API Data (Simulated)</div>
     </div>
   `;
 }
@@ -288,9 +427,10 @@ async function onMapClick(e) {
 
   try {
     // Fetch real data for this location
-    const [services, cameras, areaInfo] = await Promise.all([
+    const [services, cameras, properties, areaInfo] = await Promise.all([
       fetchNearbyAmenities(lat, lng, 3000),
       fetchNearbyCameras(lat, lng, 2000),
+      fetchNearbyProperties(lat, lng, 2000),
       reverseGeocode(lat, lng)
     ]);
 
@@ -299,11 +439,13 @@ async function onMapClick(e) {
 
     lastFetchedServices = services;
     lastFetchedCameras = Array.isArray(cameras) ? cameras : (cameras.cameras || []);
+    lastFetchedProperties = properties;
     lastAreaInfo = areaInfo;
 
     // Update markers on map
     updateEmergencyMarkers(services);
     updateCameraMarkers(lastFetchedCameras);
+    updatePropertyMarkers(lastFetchedProperties);
 
     // Calculate safety score
     const scoreData = calculateSafetyScore(currentHour, services, lastFetchedCameras, areaInfo);
@@ -330,19 +472,131 @@ function showSidebarLoading() {
   `;
 }
 
+function showEmergencyNumbers() {
+  const nums = EMERGENCY_NUMBERS[currentCountryCode] || EMERGENCY_NUMBERS.DEFAULT;
+  const lines = [
+    'Emergency Numbers',
+    '',
+    `🚨 Unified: ${nums.unified || 'N/A'}`,
+    `🚔 Police: ${nums.police || 'N/A'}`,
+    `🚑 Ambulance: ${nums.ambulance || 'N/A'}`,
+    `🚒 Fire: ${nums.fire || 'N/A'}`
+  ];
+
+  if (nums.women) lines.push(`👩 Women: ${nums.women}`);
+  if (nums.child) lines.push(`🧒 Child: ${nums.child}`);
+
+  alert(lines.join('\n'));
+}
+
 // ── Sidebar ───────────────────────────────────────────────────
 function updateSidebar(score, level, areaInfo, services, cameras, risks, features, lat, lng, factors) {
-  const scoreColor = level.class === 'very-safe' ? '#22c55e' :
-                     level.class === 'moderate' ? '#eab308' :
-                     level.class === 'caution' ? '#f97316' : '#ef4444';
+  const safeServices = services || {};
+  const safeLevelClass = ['very-safe', 'moderate', 'caution', 'danger'].includes(level.class)
+    ? level.class
+    : 'moderate';
+  const scoreColor = safeLevelClass === 'very-safe' ? '#22c55e' :
+                     safeLevelClass === 'moderate' ? '#eab308' :
+                     safeLevelClass === 'caution' ? '#f97316' : '#ef4444';
+  const safeScore = Math.max(0, Math.min(100, Math.round(toFiniteNumber(score, 0))));
 
   const nums = EMERGENCY_NUMBERS[currentCountryCode] || EMERGENCY_NUMBERS.DEFAULT;
   const cameraArray = Array.isArray(cameras) ? cameras : (cameras.cameras || []);
-  const activeCams = cameraArray.filter(c => c.status === 'active');
-  
-  const isFavorite = favoriteLocations.some(fav => 
-    Math.abs(fav.lat - lat) < 0.0001 && Math.abs(fav.lng - lng) < 0.0001
+  const policeServices = Array.isArray(safeServices.police) ? safeServices.police : [];
+  const hospitalServices = Array.isArray(safeServices.hospital) ? safeServices.hospital : [];
+  const fireServices = Array.isArray(safeServices.fire) ? safeServices.fire : [];
+  const activeCams = cameraArray.filter(c => String(c.status || '').toLowerCase() === 'active');
+
+  const safeLat = toFiniteNumber(lat, NaN);
+  const safeLng = toFiniteNumber(lng, NaN);
+  const favLat = Number.isFinite(safeLat) ? safeLat : 0;
+  const favLng = Number.isFinite(safeLng) ? safeLng : 0;
+
+  const isFavorite = favoriteLocations.some(fav =>
+    Math.abs(fav.lat - favLat) < 0.0001 && Math.abs(fav.lng - favLng) < 0.0001
   );
+
+  const safeAreaName = escapeHtml(areaInfo.name || 'Unknown Area');
+  const safeArea = escapeHtml(areaInfo.area || '');
+  const safeFullAddress = escapeHtml(areaInfo.fullAddress || `${favLat.toFixed(5)}, ${favLng.toFixed(5)}`);
+  const safeTime = escapeHtml(formatTime(currentHour));
+  const safeLevelLabel = escapeHtml(level.label || 'Unknown');
+  const safeLevelIcon = escapeHtml(level.icon || 'ℹ️');
+
+  const scoreFactorsHtml = (Array.isArray(factors) ? factors : [])
+    .map(f => `<div class="factor-item">${escapeHtml(f)}</div>`)
+    .join('');
+
+  const riskTagsHtml = (Array.isArray(risks) ? risks : [])
+    .map(r => `<span class="risk-tag negative">⚠ ${escapeHtml(r)}</span>`)
+    .join('');
+
+  const featureTagsHtml = (Array.isArray(features) ? features : [])
+    .map(s => `<span class="risk-tag positive">✓ ${escapeHtml(s)}</span>`)
+    .join('');
+
+  const cameraRowsHtml = cameraArray.slice(0, 5).map(cam => {
+    const camLat = toFiniteNumber(cam.lat, NaN);
+    const camLng = toFiniteNumber(cam.lng, NaN);
+    if (!Number.isFinite(camLat) || !Number.isFinite(camLng)) return '';
+
+    const safeCamName = escapeHtml(cam.name || 'CCTV Camera');
+    const safeResolution = escapeHtml(cam.resolution || 'Unknown');
+    const statusActive = String(cam.status || '').toLowerCase() === 'active';
+    const statusTag = statusActive
+      ? '<span style="color:#22c55e">● Online</span>'
+      : '<span style="color:#eab308">● Maintenance</span>';
+    const sourceTag = cam.source === 'openstreetmap' ? ' • 📡' : '';
+    const safeDistance = formatDistance(Math.max(0, Math.round(toFiniteNumber(cam.distance, 0))));
+
+    return `
+      <div class="service-card" onclick="map.flyTo([${camLat.toFixed(6)}, ${camLng.toFixed(6)}], 17)" tabindex="0" role="button" aria-label="View camera location on map">
+        <div class="service-icon" style="background: rgba(34,197,94,0.15); font-size: 18px;">📹</div>
+        <div class="service-info">
+          <div class="service-name">${safeCamName}</div>
+          <div class="service-meta">${safeResolution} • ${statusTag}${sourceTag}</div>
+        </div>
+        <div class="service-distance">${safeDistance}</div>
+      </div>
+    `;
+  }).join('');
+
+  const buildServiceRows = (items, iconClass, icon) => {
+    const safeItems = Array.isArray(items) ? items : [];
+    return safeItems.slice(0, 5).map(item => {
+      const itemLat = toFiniteNumber(item.lat, NaN);
+      const itemLng = toFiniteNumber(item.lng, NaN);
+      if (!Number.isFinite(itemLat) || !Number.isFinite(itemLng)) return '';
+
+      const safeName = escapeHtml(item.name || 'Service');
+      const safePhone = escapeHtml(item.phone || 'N/A');
+      const sourceTag = item.source === 'openstreetmap' ? ' • 📡 Verified' : ' • ⚠ Est.';
+      const safeDistance = formatDistance(Math.max(0, Math.round(toFiniteNumber(item.distance, 0))));
+
+      return `
+        <div class="service-card" onclick="map.flyTo([${itemLat.toFixed(6)}, ${itemLng.toFixed(6)}], 16)" tabindex="0" role="button" aria-label="View service location on map">
+          <div class="service-icon ${iconClass}">${icon}</div>
+          <div class="service-info">
+            <div class="service-name">${safeName}</div>
+            <div class="service-meta">📞 ${safePhone}${sourceTag}</div>
+          </div>
+          <div class="service-distance">${safeDistance}</div>
+        </div>
+      `;
+    }).join('');
+  };
+
+  const policeRows = buildServiceRows(policeServices, 'police', '🚔');
+  const hospitalRows = buildServiceRows(hospitalServices, 'hospital', '🏥');
+  const fireRows = buildServiceRows(fireServices, 'fire', '🚒');
+
+  const safeCountry = escapeHtml(nums.country || currentCountryCode);
+  const safeUnified = escapeHtml(nums.unified || 'N/A');
+  const safePolice = escapeHtml(nums.police || 'N/A');
+  const safeAmbulance = escapeHtml(nums.ambulance || 'N/A');
+  const safeFire = escapeHtml(nums.fire || 'N/A');
+  const safeWomen = nums.women ? escapeHtml(nums.women) : '';
+  const safeChild = nums.child ? escapeHtml(nums.child) : '';
 
   document.getElementById('sidebarContent').innerHTML = `
     ${hasApiErrors ? `
@@ -354,7 +608,7 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
         </div>
       </div>
     ` : ''}
-    
+
     <div class="data-disclaimer info" role="status">
       <span class="disclaimer-icon">ℹ️</span>
       <div>
@@ -363,111 +617,100 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
       </div>
     </div>
 
-    <!-- Safety Score -->
-    <div class="safety-score-card ${level.class}">
-      <div class="score-circle" style="--score-pct: ${score}; --score-color: ${scoreColor}">
+    <div class="safety-score-card ${safeLevelClass}">
+      <div class="score-circle" style="--score-pct: ${safeScore}; --score-color: ${scoreColor}">
         <div>
-          <div class="score-number" style="color: ${scoreColor}">${score}</div>
+          <div class="score-number" style="color: ${scoreColor}">${safeScore}</div>
           <div class="score-label">/ 100</div>
         </div>
       </div>
-      <div class="safety-label" style="color: ${scoreColor}">${level.icon} ${level.label}</div>
-      <div class="zone-name">${areaInfo.name} • ${formatTime(currentHour)}</div>
-      <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">${areaInfo.area}</div>
-      
-      <button class="favorite-btn ${isFavorite ? 'active' : ''}" onclick="toggleFavorite(${lat}, ${lng}, '${areaInfo.name.replace(/'/g, "\\'")}')">
+      <div class="safety-label" style="color: ${scoreColor}">${safeLevelIcon} ${safeLevelLabel}</div>
+      <div class="zone-name">${safeAreaName} • ${safeTime}</div>
+      <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">${safeArea}</div>
+
+      <button class="favorite-btn ${isFavorite ? 'active' : ''}" onclick="toggleFavorite(${favLat.toFixed(6)}, ${favLng.toFixed(6)})">
         ${isFavorite ? '⭐ Saved' : '☆ Save Location'}
       </button>
     </div>
 
-    <!-- Score Breakdown -->
     <div class="section">
       <div class="section-title"><span class="icon">📊</span> Score Breakdown</div>
-      <div class="score-factors">
-        ${factors.map(f => `<div class="factor-item">${f}</div>`).join('')}
-      </div>
+      <div class="score-factors">${scoreFactorsHtml}</div>
     </div>
 
-    <!-- Location -->
     <div class="section">
       <div class="section-title"><span class="icon">📍</span> Location</div>
       <div style="font-size: 12px; color: var(--text-secondary); padding: 10px 12px; background: rgba(255,255,255,0.03); border-radius: 8px; border: 1px solid var(--border-glass); line-height: 1.6;">
-        <div style="font-weight:600; color:var(--text-primary); margin-bottom:4px;">${areaInfo.name}</div>
-        <div>${areaInfo.fullAddress}</div>
-        <div style="color: var(--text-muted); margin-top: 4px; font-size: 11px;">${lat.toFixed(5)}, ${lng.toFixed(5)}</div>
+        <div style="font-weight:600; color:var(--text-primary); margin-bottom:4px;">${safeAreaName}</div>
+        <div>${safeFullAddress}</div>
+        <div style="color: var(--text-muted); margin-top: 4px; font-size: 11px;">${favLat.toFixed(5)}, ${favLng.toFixed(5)}</div>
       </div>
     </div>
 
-    <!-- Emergency Numbers -->
     <div class="section">
-      <div class="section-title"><span class="icon">📞</span> Emergency Numbers (${nums.country || currentCountryCode})</div>
+      <div class="section-title"><span class="icon">📞</span> Emergency Numbers (${safeCountry})</div>
       <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 8px;">
         <div class="service-card" style="cursor:default;">
           <div style="font-size:20px;">🚨</div>
           <div class="service-info">
-            <div class="service-name" style="color: #ef4444;">${nums.unified}</div>
+            <div class="service-name" style="color: #ef4444;">${safeUnified}</div>
             <div class="service-meta">Unified Emergency</div>
           </div>
         </div>
         <div class="service-card" style="cursor:default;">
           <div style="font-size:20px;">🚔</div>
           <div class="service-info">
-            <div class="service-name" style="color: var(--accent-light);">${nums.police}</div>
+            <div class="service-name" style="color: var(--accent-light);">${safePolice}</div>
             <div class="service-meta">Police</div>
           </div>
         </div>
         <div class="service-card" style="cursor:default;">
           <div style="font-size:20px;">🚑</div>
           <div class="service-info">
-            <div class="service-name" style="color: #22c55e;">${nums.ambulance}</div>
+            <div class="service-name" style="color: #22c55e;">${safeAmbulance}</div>
             <div class="service-meta">Ambulance</div>
           </div>
         </div>
         <div class="service-card" style="cursor:default;">
           <div style="font-size:20px;">🚒</div>
           <div class="service-info">
-            <div class="service-name" style="color: #f97316;">${nums.fire}</div>
+            <div class="service-name" style="color: #f97316;">${safeFire}</div>
             <div class="service-meta">Fire</div>
           </div>
         </div>
       </div>
-      ${nums.women ? `
+      ${safeWomen ? `
         <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px;">
           <div class="service-card" style="cursor:default;">
             <div style="font-size:20px;">👩</div>
             <div class="service-info">
-              <div class="service-name" style="color: #e879f9;">${nums.women}</div>
+              <div class="service-name" style="color: #e879f9;">${safeWomen}</div>
               <div class="service-meta">Women Helpline</div>
             </div>
           </div>
-          <div class="service-card" style="cursor:default;">
-            <div style="font-size:20px;">🧒</div>
-            <div class="service-info">
-              <div class="service-name" style="color: #fbbf24;">${nums.child}</div>
-              <div class="service-meta">Child Helpline</div>
+          ${safeChild ? `
+            <div class="service-card" style="cursor:default;">
+              <div style="font-size:20px;">🧒</div>
+              <div class="service-info">
+                <div class="service-name" style="color: #fbbf24;">${safeChild}</div>
+                <div class="service-meta">Child Helpline</div>
+              </div>
             </div>
-          </div>
+          ` : ''}
         </div>
       ` : ''}
     </div>
 
-    <!-- Risk Factors -->
     <div class="section">
       <div class="section-title"><span class="icon">⚠️</span> Risk Factors</div>
-      <div class="risk-tags">
-        ${risks.map(r => `<span class="risk-tag negative">⚠ ${r}</span>`).join('')}
-      </div>
+      <div class="risk-tags">${riskTagsHtml}</div>
     </div>
 
-    <!-- Safety Features -->
     <div class="section">
       <div class="section-title"><span class="icon">🛡️</span> Safety Features</div>
-      <div class="risk-tags">
-        ${features.map(s => `<span class="risk-tag positive">✓ ${s}</span>`).join('')}
-      </div>
+      <div class="risk-tags">${featureTagsHtml}</div>
     </div>
 
-    <!-- CCTV Cameras -->
     <div class="section">
       <div class="section-title"><span class="icon">📹</span> CCTV Cameras Nearby</div>
       <div class="camera-stats">
@@ -481,68 +724,28 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
         </div>
       </div>
       ${cameraArray.length === 0 ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:12px;">No cameras detected in this area</p>' : ''}
-      ${cameraArray.slice(0, 5).map(c => `
-        <div class="service-card" onclick="map.flyTo([${c.lat}, ${c.lng}], 17)" tabindex="0" role="button" aria-label="View ${c.name} on map">
-          <div class="service-icon" style="background: rgba(34,197,94,0.15); font-size: 18px;">📹</div>
-          <div class="service-info">
-            <div class="service-name">${c.name}</div>
-            <div class="service-meta">${c.resolution} • ${c.status === 'active' ? '<span style="color:#22c55e">● Online</span>' : '<span style="color:#eab308">● Maintenance</span>'}${c.source === 'openstreetmap' ? ' • 📡' : ''}</div>
-          </div>
-          <div class="service-distance">${formatDistance(c.distance)}</div>
-        </div>
-      `).join('')}
+      ${cameraRowsHtml}
     </div>
 
-    <!-- Police -->
     <div class="section">
       <div class="section-title"><span class="icon">🚔</span> Nearest Police Stations</div>
-      ${services.police.length === 0 ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:12px;">No police stations found within 3 km</p>' : ''}
-      ${services.police.slice(0, 5).map(p => `
-        <div class="service-card" onclick="map.flyTo([${p.lat}, ${p.lng}], 16)" tabindex="0" role="button" aria-label="View ${p.name} on map">
-          <div class="service-icon police">🚔</div>
-          <div class="service-info">
-            <div class="service-name">${p.name}</div>
-            <div class="service-meta">📞 ${p.phone}${p.source === 'openstreetmap' ? ' • 📡 Verified' : ' • ⚠ Est.'}</div>
-          </div>
-          <div class="service-distance">${formatDistance(p.distance)}</div>
-        </div>
-      `).join('')}
+      ${policeServices.length === 0 ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:12px;">No police stations found within 3 km</p>' : ''}
+      ${policeRows}
     </div>
 
-    <!-- Hospitals -->
     <div class="section">
       <div class="section-title"><span class="icon">🏥</span> Nearest Hospitals</div>
-      ${services.hospital.length === 0 ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:12px;">No hospitals found within 3 km</p>' : ''}
-      ${services.hospital.slice(0, 5).map(h => `
-        <div class="service-card" onclick="map.flyTo([${h.lat}, ${h.lng}], 16)" tabindex="0" role="button" aria-label="View ${h.name} on map">
-          <div class="service-icon hospital">🏥</div>
-          <div class="service-info">
-            <div class="service-name">${h.name}</div>
-            <div class="service-meta">📞 ${h.phone}${h.source === 'openstreetmap' ? ' • 📡 Verified' : ' • ⚠ Est.'}</div>
-          </div>
-          <div class="service-distance">${formatDistance(h.distance)}</div>
-        </div>
-      `).join('')}
+      ${hospitalServices.length === 0 ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:12px;">No hospitals found within 3 km</p>' : ''}
+      ${hospitalRows}
     </div>
 
-    <!-- Fire -->
     <div class="section">
       <div class="section-title"><span class="icon">🚒</span> Nearest Fire Stations</div>
-      ${services.fire.length === 0 ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:12px;">No fire stations found within 3 km</p>' : ''}
-      ${services.fire.slice(0, 5).map(f => `
-        <div class="service-card" onclick="map.flyTo([${f.lat}, ${f.lng}], 16)" tabindex="0" role="button" aria-label="View ${f.name} on map">
-          <div class="service-icon fire">🚒</div>
-          <div class="service-info">
-            <div class="service-name">${f.name}</div>
-            <div class="service-meta">📞 ${f.phone}${f.source === 'openstreetmap' ? ' • 📡 Verified' : ' • ⚠ Est.'}</div>
-          </div>
-          <div class="service-distance">${formatDistance(f.distance)}</div>
-        </div>
-      `).join('')}
+      ${fireServices.length === 0 ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:12px;">No fire stations found within 3 km</p>' : ''}
+      ${fireRows}
     </div>
 
-    <!-- Emergency Button -->
-    <button class="emergency-btn" onclick="alert('Emergency Numbers:\\n\\n🚨 Unified: ${nums.unified}\\n🚔 Police: ${nums.police}\\n🚑 Ambulance: ${nums.ambulance}\\n🚒 Fire: ${nums.fire}${nums.women ? '\\n👩 Women: ' + nums.women : ''}${nums.child ? '\\n🧒 Child: ' + nums.child : ''}')" aria-label="Show emergency contact numbers">
+    <button class="emergency-btn" onclick="showEmergencyNumbers()" aria-label="Show emergency contact numbers">
       🆘 Emergency Numbers
     </button>
   `;
@@ -587,16 +790,29 @@ function updateTimeDisplay() {
 }
 
 // ── Favorite Locations ────────────────────────────────────────
-function toggleFavorite(lat, lng, name) {
-  const index = favoriteLocations.findIndex(fav => 
-    Math.abs(fav.lat - lat) < 0.0001 && Math.abs(fav.lng - lng) < 0.0001
+function toggleFavorite(lat, lng, name = '') {
+  const safeLat = toFiniteNumber(lat, NaN);
+  const safeLng = toFiniteNumber(lng, NaN);
+  if (!Number.isFinite(safeLat) || !Number.isFinite(safeLng)) {
+    showNotification('Invalid location data for favorites.', 'error', 2500);
+    return;
+  }
+
+  const resolvedName = (typeof name === 'string' && name.trim())
+    ? name.trim()
+    : (lastAreaInfo && typeof lastAreaInfo.name === 'string' && lastAreaInfo.name.trim())
+      ? lastAreaInfo.name.trim()
+      : 'Saved Location';
+
+  const index = favoriteLocations.findIndex(fav =>
+    Math.abs(fav.lat - safeLat) < 0.0001 && Math.abs(fav.lng - safeLng) < 0.0001
   );
   
   if (index > -1) {
     favoriteLocations.splice(index, 1);
     showNotification('📍 Location removed from favorites', 'info', 2000);
   } else {
-    favoriteLocations.push({ lat, lng, name, timestamp: Date.now() });
+    favoriteLocations.push({ lat: safeLat, lng: safeLng, name: resolvedName, timestamp: Date.now() });
     showNotification('⭐ Location saved to favorites', 'success', 2000);
   }
   
@@ -611,6 +827,83 @@ function toggleFavorite(lat, lng, name) {
     const level = getSafetyLevel(score);
     const { risks, features } = generateRiskFactors(currentHour, lastFetchedServices, lastFetchedCameras, lastAreaInfo);
     updateSidebar(score, level, lastAreaInfo, lastFetchedServices, lastFetchedCameras, risks, features, pos.lat, pos.lng, factors);
+  }
+}
+
+// ── SafeHome Finder ───────────────────────────────────────────
+function findSafestHomes() {
+  if (!lastFetchedProperties || lastFetchedProperties.length === 0) {
+    showNotification('No properties found nearby. Please search a new area.', 'warning');
+    return;
+  }
+
+  if (!lastFetchedServices || !lastAreaInfo) {
+    showNotification('Location services are not ready yet. Please try again in a moment.', 'warning');
+    return;
+  }
+  
+  showStatus('Scoring properties for safety...');
+  
+  let bestProp = null;
+  let bestScore = -1;
+  const baseScore = calculateSafetyScore(currentHour, lastFetchedServices, lastFetchedCameras, lastAreaInfo).score;
+  const cameraArray = Array.isArray(lastFetchedCameras) ? lastFetchedCameras : [];
+  
+  lastFetchedProperties.forEach(prop => {
+    const propLat = toFiniteNumber(prop.lat, NaN);
+    const propLng = toFiniteNumber(prop.lng, NaN);
+    if (!Number.isFinite(propLat) || !Number.isFinite(propLng)) return;
+
+    let propScore = baseScore;
+
+    const policeDist = nearestDistance(lastFetchedServices.police, propLat, propLng);
+    const hospitalDist = nearestDistance(lastFetchedServices.hospital, propLat, propLng);
+    const fireDist = nearestDistance(lastFetchedServices.fire, propLat, propLng);
+    const nearbyCameras = countNearbyActiveCameras(cameraArray, propLat, propLng, 350);
+
+    if (policeDist < 300) propScore += 12;
+    else if (policeDist < 800) propScore += 7;
+    else if (policeDist < 1500) propScore += 3;
+    else if (!Number.isFinite(policeDist) || policeDist > 2500) propScore -= 10;
+
+    if (hospitalDist < 600) propScore += 8;
+    else if (hospitalDist < 1200) propScore += 4;
+    else if (!Number.isFinite(hospitalDist) || hospitalDist > 3000) propScore -= 5;
+
+    if (fireDist < 1000) propScore += 4;
+    else if (!Number.isFinite(fireDist) || fireDist > 3000) propScore -= 3;
+
+    if (nearbyCameras >= 3) propScore += 8;
+    else if (nearbyCameras >= 1) propScore += 3;
+    else propScore -= 4;
+
+    propScore = Math.max(0, Math.min(100, Math.round(propScore)));
+    
+    if (propScore > bestScore) {
+      bestScore = propScore;
+      bestProp = { ...prop, lat: propLat, lng: propLng };
+    }
+  });
+
+  if (bestProp) {
+    setTimeout(() => {
+      showStatus('');
+      showNotification(`🏆 Safest Home Found! Estimated Score: ${bestScore}/100`, 'success', 5000);
+      map.flyTo([bestProp.lat, bestProp.lng], 17);
+      
+      // Simulate a click on the safest property
+      setTimeout(() => {
+        onMapClick({ latlng: { lat: bestProp.lat, lng: bestProp.lng } });
+        // Find and open the popup for this marker visually if possible
+        propertiesLayerGroup.eachLayer(layer => {
+          if (layer.getLatLng().lat === bestProp.lat && layer.getLatLng().lng === bestProp.lng) {
+            layer.openPopup();
+          }
+        });
+      }, 500);
+    }, 1000);
+  } else {
+    showStatus('');
   }
 }
 
@@ -633,6 +926,11 @@ function toggleLayer(type) {
       layerState.emergency = !layerState.emergency;
       if (layerState.emergency) emergencyLayerGroup.addTo(map);
       else map.removeLayer(emergencyLayerGroup);
+      break;
+    case 'properties':
+      layerState.properties = !layerState.properties;
+      if (layerState.properties) propertiesLayerGroup.addTo(map);
+      else map.removeLayer(propertiesLayerGroup);
       break;
   }
 
@@ -657,15 +955,24 @@ async function searchLocation() {
   btn.disabled = true;
 
   try {
-    const response = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1`,
-      { headers: { 'Accept-Language': 'en' } }
-    );
+    const searchUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1`;
+    const response = typeof throttledFetch === 'function'
+      ? await throttledFetch(searchUrl, { headers: { 'Accept-Language': 'en' } })
+      : await fetch(searchUrl, { headers: { 'Accept-Language': 'en' } });
+
+    if (!response.ok) {
+      throw new Error(`Search API returned status ${response.status}`);
+    }
+
     const data = await response.json();
 
-    if (data.length > 0) {
+    if (Array.isArray(data) && data.length > 0) {
       const lat = parseFloat(data[0].lat);
       const lon = parseFloat(data[0].lon);
+
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+        throw new Error('Invalid coordinates returned by geocoder');
+      }
 
       map.flyTo([lat, lon], 15, { duration: 1.5 });
       showNotification(`📍 Found: ${data[0].display_name.split(',')[0]}`, 'success', 3000);
@@ -678,12 +985,12 @@ async function searchLocation() {
       showNotification('❌ Location not found. Try a different search term.', 'error', 3000);
     }
   } catch (err) {
-    showNotification('❌ Search failed. Please check your internet connection.', 'error', 3000);
+    showNotification('❌ Search failed. Please try again in a moment.', 'error', 3000);
     console.error(err);
+  } finally {
+    btn.textContent = originalText;
+    btn.disabled = false;
   }
-
-  btn.textContent = originalText;
-  btn.disabled = false;
 }
 
 function onSearchKeydown(e) {

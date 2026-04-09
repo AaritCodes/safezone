@@ -9,6 +9,7 @@ const EdgeAI = (function() {
   let audioContext = null;
   let analyser = null;
   let microphone = null;
+  let audioStream = null;
   let animationFrameId = null;
   
   // Sensor Data
@@ -38,7 +39,11 @@ const EdgeAI = (function() {
   // --- Audio Processing --- //
   async function startAudioProcessing() {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+        throw new Error('getUserMedia is not supported in this browser');
+      }
+
+      audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       
       const AudioContext = window.AudioContext || window.webkitAudioContext;
       audioContext = new AudioContext();
@@ -48,7 +53,7 @@ const EdgeAI = (function() {
       analyser.fftSize = 512;
       analyser.smoothingTimeConstant = 0.4; 
       
-      microphone = audioContext.createMediaStreamSource(stream);
+      microphone = audioContext.createMediaStreamSource(audioStream);
       microphone.connect(analyser);
       
       processAudio();
@@ -84,7 +89,7 @@ const EdgeAI = (function() {
     if (wasLoud !== loudNoiseDetected) {
       triggerUpdate();
       if (loudNoiseDetected && typeof showNotification === 'function') {
-        showNotification("⚠️ Edge AI Detected: Unusual Audio Splike", "warning");
+        showNotification("⚠️ Edge AI Detected: Unusual Audio Spike", "warning");
       }
     }
     
@@ -93,10 +98,24 @@ const EdgeAI = (function() {
 
   function stopAudioProcessing() {
     if (animationFrameId) cancelAnimationFrame(animationFrameId);
-    if (microphone) microphone.disconnect();
+    animationFrameId = null;
+
+    if (microphone) {
+      microphone.disconnect();
+      microphone = null;
+    }
+
+    if (audioStream) {
+      audioStream.getTracks().forEach(track => track.stop());
+      audioStream = null;
+    }
+
     if (audioContext && audioContext.state !== 'closed') {
       audioContext.close();
     }
+    audioContext = null;
+    analyser = null;
+
     currentAudioLevel = 0;
     loudNoiseDetected = false;
   }

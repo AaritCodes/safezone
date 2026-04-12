@@ -269,6 +269,27 @@ const MAP_CENTER = [28.6139, 77.2090]; // [latitude, longitude]
 const MAP_ZOOM = 13; // Zoom level (1-19)
 ```
 
+### Google API Key (Optional)
+SafeZone can use Google APIs for geocoding, reverse geocoding, directions, and approximate location.
+
+Priority order for key loading:
+1. `window.SAFEZONE_GOOGLE_API_KEY`
+2. `<meta name="safezone-google-api-key" content="...">`
+3. `GOOGLE_API_KEY` constant in `data.js` (defaults to empty)
+
+Recommended setup for local development:
+```html
+<script>
+   window.SAFEZONE_GOOGLE_API_KEY = 'YOUR_GOOGLE_API_KEY';
+</script>
+```
+
+Security notes:
+- Never commit a real API key in source files
+- Restrict key usage by HTTP referrer in Google Cloud Console
+- Enable only the APIs you actually use (Geocoding, Directions, Geolocation)
+- Rotate keys immediately if they were previously committed
+
 ### Adjusting Cache Duration
 Edit `data.js`:
 ```javascript
@@ -302,6 +323,18 @@ const policeBonus = Math.min(20, policeCount * 6); // Adjust multiplier
 - **Endpoint**: `https://overpass-api.de/api/interpreter`
 - **Rate Limit**: Reasonable use policy
 - **Usage**: Police, hospitals, fire stations, CCTV data
+
+### Google Maps Platform APIs (Optional)
+- **Purpose**: Higher quality geocoding, reverse geocoding, turn-by-turn directions, IP-based location
+- **Endpoints**:
+   - `https://maps.googleapis.com/maps/api/geocode/json`
+   - `https://maps.googleapis.com/maps/api/directions/json`
+   - `https://www.googleapis.com/geolocation/v1/geolocate`
+- **Fallbacks**:
+   - Geocoding/reverse geocoding -> Nominatim
+   - Routing -> OSRM
+   - Approximate location -> map center fallback
+- **Handled errors**: 401, 403, 429, request timeout, and service/network failures
 
 ### Leaflet.js
 - **Purpose**: Interactive map rendering
@@ -378,6 +411,19 @@ if (score >= 80) return { label: 'Very Safe', class: 'very-safe', icon: '🟢' }
 - **Cause**: Overpass API rate limit or downtime
 - **Solution**: Wait a few minutes and try again
 - **Note**: Fallback data is automatically used
+
+### Google API Warnings
+- **Issue**: "Google API key was rejected" (401/403)
+- **Cause**: Invalid key, wrong referrer restrictions, or API not enabled
+- **Solution**: Verify key, restrictions, and enabled Google APIs
+
+- **Issue**: "Google API quota or rate limit was reached" (429/OVER_QUERY_LIMIT)
+- **Cause**: Daily or per-minute quota exhausted
+- **Solution**: Increase quota/billing limits or reduce request volume
+
+- **Issue**: "Google API request timed out"
+- **Cause**: Temporary network/service latency
+- **Solution**: Retry; SafeZone automatically falls back to OSM/OSRM
 
 ### Search Not Working
 - **Check spelling and try different terms**

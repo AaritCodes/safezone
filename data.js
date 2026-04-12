@@ -5,6 +5,409 @@
 // Default center: New Delhi, India
 const MAP_CENTER = [28.6139, 77.2090];
 const MAP_ZOOM = 13;
+const GOOGLE_API_KEY = '';
+const GOOGLE_API_KEY_META_NAME = 'safezone-google-api-key';
+
+function readGoogleApiKeyFromMetaTag() {
+  if (typeof document === 'undefined' || typeof document.querySelector !== 'function') {
+    return '';
+  }
+
+  const meta = document.querySelector(`meta[name="${GOOGLE_API_KEY_META_NAME}"]`);
+  if (!meta) return '';
+
+  const content = String(meta.getAttribute('content') || '').trim();
+  if (!content) return '';
+
+  if (/^your[_\s-]?google[_\s-]?api[_\s-]?key$/i.test(content)) {
+    return '';
+  }
+
+  return content;
+}
+
+function getGoogleApiKey() {
+  if (typeof window !== 'undefined' && typeof window.SAFEZONE_GOOGLE_API_KEY === 'string' && window.SAFEZONE_GOOGLE_API_KEY.trim()) {
+    return window.SAFEZONE_GOOGLE_API_KEY.trim();
+  }
+
+  const metaKey = readGoogleApiKeyFromMetaTag();
+  if (metaKey) return metaKey;
+
+  return GOOGLE_API_KEY;
+}
+
+function hasGoogleApiKey() {
+  const key = getGoogleApiKey();
+  return Boolean(key && key.length > 20);
+}
+
+function getGoogleErrorCode(details = {}) {
+  if (details.code) return details.code;
+
+  const googleStatus = String(details.googleStatus || '').toUpperCase();
+  const httpStatus = Number(details.httpStatus || 0);
+
+  if (googleStatus === 'OVER_QUERY_LIMIT') return 'GOOGLE_RATE_LIMITED';
+  if (googleStatus === 'OVER_DAILY_LIMIT') return 'GOOGLE_RATE_LIMITED';
+  if (googleStatus === 'REQUEST_DENIED') return 'GOOGLE_FORBIDDEN';
+  if (googleStatus === 'INVALID_REQUEST') return 'GOOGLE_INVALID_REQUEST';
+  if (googleStatus === 'UNKNOWN_ERROR') return 'GOOGLE_SERVICE_UNAVAILABLE';
+
+  if (httpStatus === 401) return 'GOOGLE_UNAUTHORIZED';
+  if (httpStatus === 403) return 'GOOGLE_FORBIDDEN';
+  if (httpStatus === 429) return 'GOOGLE_RATE_LIMITED';
+  if (httpStatus >= 500) return 'GOOGLE_SERVICE_UNAVAILABLE';
+
+  return 'GOOGLE_REQUEST_FAILED';
+}
+
+function getGoogleErrorMessage(code, context, details = {}) {
+  let message = 'Google API request failed.';
+
+  if (code === 'GOOGLE_UNAUTHORIZED') {
+    message = 'Google API key was rejected (401 unauthorized).';
+  } else if (code === 'GOOGLE_FORBIDDEN') {
+    message = 'Google API request was denied (403 forbidden).';
+  } else if (code === 'GOOGLE_RATE_LIMITED') {
+    message = 'Google API quota was exceeded or rate limited.';
+  } else if (code === 'GOOGLE_TIMEOUT') {
+    message = 'Google API request timed out.';
+  } else if (code === 'GOOGLE_NETWORK') {
+    message = 'Google API request failed due to network connectivity.';
+  } else if (code === 'GOOGLE_INVALID_REQUEST') {
+    message = 'Google API request parameters were invalid.';
+  } else if (code === 'GOOGLE_SERVICE_UNAVAILABLE') {
+    message = 'Google API service is temporarily unavailable.';
+  }
+
+  const scope = context ? ` (${context})` : '';
+  const googleMessage = String(details.googleMessage || '').trim();
+  if (googleMessage) {
+    return `${message}${scope}: ${googleMessage}`;
+  }
+
+  return `${message}${scope}`;
+}
+
+function createGoogleApiError(context, details = {}) {
+  const code = getGoogleErrorCode(details);
+  const error = new Error(getGoogleErrorMessage(code, context, details));
+  error.name = 'GoogleApiError';
+  error.code = code;
+  error.context = context;
+
+  if (details.httpStatus) error.httpStatus = Number(details.httpStatus);
+  if (details.googleStatus) error.googleStatus = String(details.googleStatus);
+  if (details.googleMessage) error.googleMessage = String(details.googleMessage);
+  if (details.cause) error.cause = details.cause;
+
+  return error;
+}
+
+async function parseGoogleJsonResponse(response) {
+  try {
+    return await response.json();
+  } catch (err) {
+    return null;
+  }
+}
+
+async function fetchGoogleJson(url, options = {}, timeoutMs = 9000, context = 'request') {
+  let response;
+
+  try {
+    response = await fetchWithTimeout(url, options, timeoutMs);
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      throw createGoogleApiError(context, { code: 'GOOGLE_TIMEOUT', cause: err });
+    }
+
+    throw createGoogleApiError(context, { code: 'GOOGLE_NETWORK', cause: err });
+  }
+
+  const data = await parseGoogleJsonResponse(response);
+
+  if (!response.ok) {
+    throw createGoogleApiError(context, {
+      httpStatus: response.status,
+      googleStatus: data && data.status
+        ? data.status
+        : (data && data.error && data.error.status ? data.error.status : ''),
+      googleMessage: data && data.error_message
+        ? data.error_message
+        : (data && data.error && data.error.message ? data.error.message : '')
+    });
+  }
+
+  if (data && typeof data.status === 'string') {
+    if (data.status === 'ZERO_RESULTS') {
+      return { data, noResults: true };
+    }
+
+    if (data.status !== 'OK') {
+      throw createGoogleApiError(context, {
+        googleStatus: data.status,
+        googleMessage: data.error_message || ''
+      });
+    }
+  }
+
+  return { data: data || {}, noResults: false };
+}
+
+function notifyGoogleFallback(error, fallbackProvider) {
+  if (typeof window === 'undefined' || typeof window.SafeZoneNotifyGoogleFallback !== 'function') {
+    return;
+  }
+
+  try {
+    window.SafeZoneNotifyGoogleFallback(error, fallbackProvider);
+  } catch (notifyErr) {
+    console.warn('Google fallback notifier failed:', notifyErr);
+  }
+}
+
+function getCurrentRegionHint() {
+  if (typeof currentCountryCode === 'string' && currentCountryCode.trim()) {
+    return currentCountryCode.trim().toLowerCase();
+  }
+  return '';
+}
+
+function stripHtmlTags(value) {
+  return String(value || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function decodeGooglePolyline(encoded) {
+  if (!encoded) return [];
+
+  let index = 0;
+  let lat = 0;
+  let lng = 0;
+  const coordinates = [];
+
+  while (index < encoded.length) {
+    let shift = 0;
+    let result = 0;
+    let byte = null;
+
+    do {
+      if (index >= encoded.length) return coordinates;
+      byte = encoded.charCodeAt(index++) - 63;
+      result |= (byte & 0x1f) << shift;
+      shift += 5;
+    } while (byte >= 0x20);
+
+    const deltaLat = (result & 1) ? ~(result >> 1) : (result >> 1);
+    lat += deltaLat;
+
+    shift = 0;
+    result = 0;
+
+    do {
+      if (index >= encoded.length) return coordinates;
+      byte = encoded.charCodeAt(index++) - 63;
+      result |= (byte & 0x1f) << shift;
+      shift += 5;
+    } while (byte >= 0x20);
+
+    const deltaLng = (result & 1) ? ~(result >> 1) : (result >> 1);
+    lng += deltaLng;
+
+    coordinates.push([lat / 1e5, lng / 1e5]);
+  }
+
+  return coordinates;
+}
+
+async function geocodeQueryWithGoogle(query) {
+  if (!hasGoogleApiKey()) return null;
+
+  const key = getGoogleApiKey();
+  const params = new URLSearchParams({
+    address: query,
+    key
+  });
+
+  const region = getCurrentRegionHint();
+  if (region && /^[a-z]{2}$/i.test(region)) {
+    params.set('region', region);
+  }
+
+  const { data, noResults } = await fetchGoogleJson(
+    `https://maps.googleapis.com/maps/api/geocode/json?${params.toString()}`,
+    {},
+    9000,
+    'geocode'
+  );
+
+  if (noResults || !Array.isArray(data.results) || data.results.length === 0) {
+    return null;
+  }
+
+  const best = data.results[0];
+  const location = best.geometry && best.geometry.location ? best.geometry.location : null;
+  if (!location || !Number.isFinite(Number(location.lat)) || !Number.isFinite(Number(location.lng))) {
+    return null;
+  }
+
+  const label = String(best.formatted_address || query).split(',')[0].trim();
+  const addressComponents = Array.isArray(best.address_components) ? best.address_components : [];
+  const countryComponent = addressComponents.find(component => Array.isArray(component.types) && component.types.includes('country'));
+  if (countryComponent && countryComponent.short_name) {
+    currentCountryCode = String(countryComponent.short_name).toUpperCase();
+  }
+
+  return {
+    lat: Number(location.lat),
+    lng: Number(location.lng),
+    label,
+    fullLabel: String(best.formatted_address || query),
+    source: 'google-geocode'
+  };
+}
+
+async function reverseGeocodeWithGoogle(lat, lng) {
+  if (!hasGoogleApiKey()) return null;
+
+  const key = getGoogleApiKey();
+  const params = new URLSearchParams({
+    latlng: `${lat},${lng}`,
+    key
+  });
+
+  const { data, noResults } = await fetchGoogleJson(
+    `https://maps.googleapis.com/maps/api/geocode/json?${params.toString()}`,
+    {},
+    9000,
+    'reverse-geocode'
+  );
+
+  if (noResults || !Array.isArray(data.results) || data.results.length === 0) {
+    return null;
+  }
+
+  const best = data.results[0];
+  const addressComponents = Array.isArray(best.address_components) ? best.address_components : [];
+  const getComponent = (types) => {
+    const match = addressComponents.find(component => Array.isArray(component.types) && types.some(type => component.types.includes(type)));
+    return match ? match.long_name : '';
+  };
+
+  const countryShort = (() => {
+    const match = addressComponents.find(component => Array.isArray(component.types) && component.types.includes('country'));
+    return match && match.short_name ? String(match.short_name).toUpperCase() : '';
+  })();
+
+  if (countryShort) {
+    currentCountryCode = countryShort;
+  }
+
+  const locality = getComponent(['neighborhood', 'sublocality', 'locality', 'administrative_area_level_2']);
+  const area = getComponent(['locality', 'administrative_area_level_2', 'administrative_area_level_1']);
+
+  return {
+    name: locality || String(best.formatted_address || 'Selected location').split(',')[0],
+    fullAddress: String(best.formatted_address || `${lat.toFixed(5)}, ${lng.toFixed(5)}`),
+    area: area || locality || '',
+    type: 'google-place',
+    category: 'geocode',
+    countryCode: currentCountryCode,
+    source: 'google-geocode'
+  };
+}
+
+async function fetchApproximateLocationFromGoogle() {
+  if (!hasGoogleApiKey()) return null;
+
+  const key = getGoogleApiKey();
+  const url = `https://www.googleapis.com/geolocation/v1/geolocate?key=${encodeURIComponent(key)}`;
+  const { data } = await fetchGoogleJson(
+    url,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ considerIp: true })
+    },
+    9000,
+    'geolocation'
+  );
+
+  const location = data && data.location ? data.location : null;
+  const lat = location ? Number(location.lat) : NaN;
+  const lng = location ? Number(location.lng) : NaN;
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return null;
+  }
+
+  return {
+    lat,
+    lng,
+    accuracy: Number(data.accuracy || 0),
+    source: 'google-geolocation'
+  };
+}
+
+async function fetchRouteDirectionsWithGoogle(fromLat, fromLng, toLat, toLng, profile = 'driving') {
+  if (!hasGoogleApiKey()) return null;
+
+  const key = getGoogleApiKey();
+  const mode = profile === 'walking' ? 'walking' : 'driving';
+  const params = new URLSearchParams({
+    origin: `${fromLat},${fromLng}`,
+    destination: `${toLat},${toLng}`,
+    mode,
+    alternatives: 'false',
+    key
+  });
+
+  const { data, noResults } = await fetchGoogleJson(
+    `https://maps.googleapis.com/maps/api/directions/json?${params.toString()}`,
+    {},
+    9000,
+    'directions'
+  );
+
+  if (noResults || !Array.isArray(data.routes) || data.routes.length === 0) {
+    return null;
+  }
+
+  const route = data.routes[0];
+  const leg = Array.isArray(route.legs) && route.legs.length > 0 ? route.legs[0] : null;
+  if (!leg) {
+    return null;
+  }
+
+  const encodedPolyline = route.overview_polyline && route.overview_polyline.points ? route.overview_polyline.points : '';
+  const path = decodeGooglePolyline(encodedPolyline);
+
+  const steps = (Array.isArray(leg.steps) ? leg.steps : []).map((step, i) => {
+    const endLocation = step.end_location || {};
+    const instruction = stripHtmlTags(step.html_instructions || 'Continue');
+    const distance = Math.round(step.distance && step.distance.value ? step.distance.value : 0);
+    const duration = Math.round(step.duration && step.duration.value ? step.duration.value : 0);
+
+    return {
+      index: i,
+      instruction,
+      voiceInstruction: `${instruction}. Continue for ${formatDistance(distance)}.`,
+      distance,
+      duration,
+      lat: Number.isFinite(Number(endLocation.lat)) ? Number(endLocation.lat) : toLat,
+      lng: Number.isFinite(Number(endLocation.lng)) ? Number(endLocation.lng) : toLng
+    };
+  });
+
+  return {
+    source: 'google-directions',
+    distance: Math.round(leg.distance && leg.distance.value ? leg.distance.value : 0),
+    duration: Math.round(leg.duration && leg.duration.value ? leg.duration.value : 0),
+    path: path.length > 1 ? path : [[fromLat, fromLng], [toLat, toLng]],
+    steps
+  };
+}
 
 // ── Real Emergency Numbers (Expanded) ─────────────────────────
 const EMERGENCY_NUMBERS = {
@@ -303,6 +706,18 @@ function generateFallbackCameras(lat, lng) {
 
 // ── Reverse Geocoding (get area name) ─────────────────────────
 async function reverseGeocode(lat, lng) {
+  if (hasGoogleApiKey()) {
+    try {
+      const googleResult = await reverseGeocodeWithGoogle(lat, lng);
+      if (googleResult) {
+        return googleResult;
+      }
+    } catch (err) {
+      console.warn('Google reverse geocode failed, falling back to OSM:', err);
+      notifyGoogleFallback(err, 'OpenStreetMap reverse geocoding');
+    }
+  }
+
   try {
     const response = await throttledFetch(
       `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=16&addressdetails=1`,
@@ -1026,6 +1441,18 @@ function formatRouteInstruction(step) {
 }
 
 async function fetchRouteDirections(fromLat, fromLng, toLat, toLng, profile = 'driving') {
+  if (hasGoogleApiKey()) {
+    try {
+      const googleRoute = await fetchRouteDirectionsWithGoogle(fromLat, fromLng, toLat, toLng, profile);
+      if (googleRoute) {
+        return googleRoute;
+      }
+    } catch (err) {
+      console.warn('Google directions failed, falling back to OSRM:', err);
+      notifyGoogleFallback(err, 'OSRM routing');
+    }
+  }
+
   const routeProfile = profile === 'walking' ? 'foot' : 'driving';
   const url = `https://router.project-osrm.org/route/v1/${routeProfile}/${fromLng},${fromLat};${toLng},${toLat}?overview=full&geometries=geojson&steps=true&alternatives=false`;
 

@@ -60,6 +60,50 @@ function formatIncidentSourceLabel(source) {
   return key.replace(/-/g, ' ');
 }
 
+const GOOGLE_FALLBACK_NOTICE_WINDOW_MS = 15000;
+let lastGoogleFallbackNoticeAt = 0;
+let lastGoogleFallbackNoticeKey = '';
+
+function isGoogleApiError(error) {
+  return Boolean(error && typeof error.code === 'string' && error.code.indexOf('GOOGLE_') === 0);
+}
+
+function getGoogleFallbackMessage(error) {
+  const code = String((error && error.code) || '');
+
+  if (code === 'GOOGLE_UNAUTHORIZED') return 'Google API key was rejected (401 unauthorized).';
+  if (code === 'GOOGLE_FORBIDDEN') return 'Google API request was denied (403 forbidden). Check key restrictions and enabled APIs.';
+  if (code === 'GOOGLE_RATE_LIMITED') return 'Google API quota or rate limit was reached.';
+  if (code === 'GOOGLE_TIMEOUT') return 'Google API request timed out.';
+  if (code === 'GOOGLE_NETWORK') return 'Google API request failed due to network connectivity.';
+  if (code === 'GOOGLE_INVALID_REQUEST') return 'Google API rejected the request parameters.';
+  if (code === 'GOOGLE_SERVICE_UNAVAILABLE') return 'Google API service is temporarily unavailable.';
+
+  return 'Google API request failed.';
+}
+
+function notifyGoogleFallback(error, fallbackProvider = 'fallback provider') {
+  if (!isGoogleApiError(error)) return;
+
+  const context = String((error && error.context) || 'request');
+  const key = `${error.code}:${context}:${fallbackProvider}`;
+  const now = Date.now();
+
+  if (key === lastGoogleFallbackNoticeKey && now - lastGoogleFallbackNoticeAt < GOOGLE_FALLBACK_NOTICE_WINDOW_MS) {
+    return;
+  }
+
+  lastGoogleFallbackNoticeKey = key;
+  lastGoogleFallbackNoticeAt = now;
+
+  const reason = getGoogleFallbackMessage(error);
+  showNotification(`⚠️ ${reason} Using ${fallbackProvider}.`, 'warning', 5200);
+}
+
+if (typeof window !== 'undefined') {
+  window.SafeZoneNotifyGoogleFallback = notifyGoogleFallback;
+}
+
 // ── Initialize Map ────────────────────────────────────────────
 function initMap() {
   map = L.map('map', {
@@ -919,7 +963,23 @@ function buildGeocodeQueryVariants(query) {
     addVariant(`${normalized} apartment`);
   }
 
-  return variants.slice(0, 6);
+  if (normalized.includes(',')) {
+    const parts = normalized.split(',').map(p => p.trim()).filter(Boolean);
+    if (parts.length > 1) {
+      addVariant(parts.slice(1).join(', '));
+      addVariant(parts[parts.length - 1]);
+    }
+  } else {
+    const words = normalized.split(/\s+/);
+    if (words.length > 1) {
+      addVariant(words.slice(1).join(' '));
+      if (words.length > 2) {
+        addVariant(words.slice(-2).join(' '));
+      }
+    }
+  }
+
+  return variants.slice(0, 10);
 }
 
 function buildSearchViewbox(center, delta = 0.18) {
@@ -1022,6 +1082,16 @@ async function geocodeQuery(query) {
   const normalizedQuery = normalizeSearchQuery(query);
   if (!normalizedQuery) return null;
 
+  if (typeof geocodeQueryWithGoogle === 'function') {
+    try {
+      const googleResult = await geocodeQueryWithGoogle(normalizedQuery);
+      if (googleResult) return googleResult;
+    } catch (err) {
+      console.warn('Google geocode lookup failed, falling back to OSM:', err);
+      notifyGoogleFallback(err, 'OpenStreetMap geocoding');
+    }
+  }
+
   const queryVariants = buildGeocodeQueryVariants(normalizedQuery);
   const countryCode = typeof currentCountryCode === 'string' ? currentCountryCode.toLowerCase() : '';
   const viewbox = buildSearchViewbox(currentMapCenter);
@@ -1050,7 +1120,7 @@ async function geocodeQuery(query) {
   const candidates = [];
   const seen = new Set();
 
-  for (const plan of plans.slice(0, 7)) {
+  for (const plan of plans.slice(0, 12)) {
     try {
       const results = await fetchNominatimCandidates(plan.q, plan);
       for (const item of results) {
@@ -1226,9 +1296,41 @@ function closeDirectionsPanel() {
 }
 
 function getCurrentLocation() {
+  const mapCenterFallback = {
+    lat: currentMapCenter[0],
+    lng: currentMapCenter[1],
+    source: 'map-center'
+  };
+
   return new Promise((resolve) => {
+    const resolveWithGoogleApproximation = async () => {
+      if (typeof fetchApproximateLocationFromGoogle !== 'function') return false;
+
+      try {
+        const approx = await fetchApproximateLocationFromGoogle();
+        if (approx && Number.isFinite(approx.lat) && Number.isFinite(approx.lng)) {
+          const accuracyNote = approx.accuracy
+            ? ` (~${Math.round(approx.accuracy)}m accuracy)`
+            : '';
+          showNotification(`Using approximate Google location${accuracyNote} as start point.`, 'warning', 4200);
+          resolve({ lat: approx.lat, lng: approx.lng, source: 'google-approximate' });
+          return true;
+        }
+      } catch (err) {
+        console.warn('Google approximate location failed:', err);
+        notifyGoogleFallback(err, 'map center location fallback');
+      }
+
+      return false;
+    };
+
     if (!navigator.geolocation) {
-      resolve({ lat: currentMapCenter[0], lng: currentMapCenter[1], source: 'map-center' });
+      resolveWithGoogleApproximation().then((resolvedFromGoogle) => {
+        if (resolvedFromGoogle) return;
+
+        showNotification('Geolocation is unavailable. Using current map center as start point.', 'warning', 4000);
+        resolve(mapCenterFallback);
+      });
       return;
     }
 
@@ -1236,9 +1338,22 @@ function getCurrentLocation() {
       (pos) => {
         resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, source: 'device' });
       },
-      () => {
-        showNotification('Location permission denied. Using current map center as start point.', 'warning', 4000);
-        resolve({ lat: currentMapCenter[0], lng: currentMapCenter[1], source: 'map-center' });
+      async (error) => {
+        const resolvedFromGoogle = await resolveWithGoogleApproximation();
+        if (resolvedFromGoogle) return;
+
+        const code = error && typeof error.code === 'number' ? error.code : 0;
+        let message = 'Unable to access your location.';
+        if (code === 1) {
+          message = 'Location permission denied.';
+        } else if (code === 2) {
+          message = 'Location signal is unavailable.';
+        } else if (code === 3) {
+          message = 'Location request timed out.';
+        }
+
+        showNotification(`${message} Using current map center as start point.`, 'warning', 4000);
+        resolve(mapCenterFallback);
       },
       {
         enableHighAccuracy: true,
@@ -1307,6 +1422,8 @@ async function startDirectionsTo(lat, lng, label = 'Destination') {
 
     if (route.error) {
       showNotification('⚠️ Live routing unavailable. Showing direct fallback line.', 'warning', 4000);
+    } else if (route.source === 'google-directions') {
+      showNotification(`🧭 Route ready via Google to ${label}`, 'success', 2500);
     } else {
       showNotification(`🧭 Route ready to ${label}`, 'success', 2500);
     }

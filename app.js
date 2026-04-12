@@ -43,6 +43,23 @@ function sanitizePhoneNumber(phone) {
   return String(phone || '').replace(/[^\d+]/g, '');
 }
 
+function formatIncidentSourceLabel(source) {
+  const key = String(source || 'unavailable');
+  const labels = {
+    'uk-police-data': 'UK Police public crime feed',
+    'osm-civic-risk-proxy': 'OpenStreetMap civic risk proxy',
+    'model-derived-risk-proxy': 'Model-derived civic proxy',
+    'crime-feed-error': 'Crime feed temporary error',
+    'public-crime-feed-unavailable': 'Regional crime feed unavailable',
+    'osm-road-signals': 'OpenStreetMap road hazard feed',
+    'accident-feed-error': 'Road hazard feed temporary error',
+    'unavailable': 'Unavailable'
+  };
+
+  if (labels[key]) return labels[key];
+  return key.replace(/-/g, ' ');
+}
+
 // ── Initialize Map ────────────────────────────────────────────
 function initMap() {
   map = L.map('map', {
@@ -478,6 +495,12 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
   const cameraArray = Array.isArray(cameras) ? cameras : (cameras.cameras || []);
   const activeCams = cameraArray.filter(c => c.status === 'active');
   const safeAreaName = escapeJsString(areaInfo.name || 'Selected location');
+  const crimeSourceLabel = riskData ? formatIncidentSourceLabel(riskData.sources && riskData.sources.crime) : 'Unavailable';
+  const accidentSourceLabel = riskData ? formatIncidentSourceLabel(riskData.sources && riskData.sources.accidents) : 'Unavailable';
+  const usesProxyRisk = Boolean(riskData && riskData.sources && (
+    String(riskData.sources.crime || '').includes('proxy') ||
+    String(riskData.sources.accidents || '').includes('proxy')
+  ));
 
   const isFavorite = favoriteLocations.some(fav =>
     Math.abs(fav.lat - lat) < 0.0001 && Math.abs(fav.lng - lng) < 0.0001
@@ -542,8 +565,9 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
           </div>
         </div>
         <div style="font-size: 11px; color: var(--text-muted); line-height: 1.5;">
-          Confidence: ${escapeHtml(riskData.confidence || 'low')} • Crime source: ${escapeHtml((riskData.sources && riskData.sources.crime) || 'unavailable')} • Accident source: ${escapeHtml((riskData.sources && riskData.sources.accidents) || 'unavailable')}
+          Confidence: ${escapeHtml(riskData.confidence || 'low')} • Crime source: ${escapeHtml(crimeSourceLabel)} • Accident source: ${escapeHtml(accidentSourceLabel)}
         </div>
+        ${usesProxyRisk ? '<div style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">Using civic proxy signals for areas without official open crime APIs.</div>' : ''}
       </div>
     ` : ''}
 

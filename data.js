@@ -461,6 +461,8 @@ const OVERPASS_ENDPOINTS = [
   'https://overpass.kumi.systems/api/interpreter',
   'https://lz4.overpass-api.de/api/interpreter'
 ];
+const GOOGLE_PLACES_ENDPOINT = 'https://maps.googleapis.com/maps/api/place/nearbysearch/json';
+const GOOGLE_PLACES_MAX_RADIUS = 50000;
 
 const THEFT_CATEGORIES = new Set([
   'burglary',
@@ -530,8 +532,180 @@ async function fetchOverpassJson(query, timeoutMs = FETCH_TIMEOUT_MS) {
   throw lastError || new Error('All Overpass endpoints failed');
 }
 
-// ── Overpass API — Fetch Real Nearby Services ─────────────────
+function normalizeGooglePlacesRadius(radius, fallbackRadius = 3000) {
+  const parsed = Number(radius);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallbackRadius;
+  return Math.max(100, Math.min(GOOGLE_PLACES_MAX_RADIUS, Math.round(parsed)));
+}
+
+async function fetchGoogleNearbyPlaces(lat, lng, radius, options = {}) {
+  if (!hasGoogleApiKey()) return [];
+
+  const key = getGoogleApiKey();
+  const params = new URLSearchParams({
+    location: `${lat},${lng}`,
+    radius: String(normalizeGooglePlacesRadius(radius, 3000)),
+    key
+  });
+
+  if (options.type) {
+    params.set('type', String(options.type));
+  }
+
+  if (options.keyword) {
+    params.set('keyword', String(options.keyword));
+  }
+
+  const { data, noResults } = await fetchGoogleJson(
+    `${GOOGLE_PLACES_ENDPOINT}?${params.toString()}`,
+    {},
+    9000,
+    options.context || 'places-nearby'
+  );
+
+  if (noResults || !Array.isArray(data.results)) {
+    return [];
+  }
+
+  return data.results;
+}
+
+function mapGoogleAmenityResults(results, amenityType, userLat, userLng) {
+  const mapped = [];
+
+  (results || []).forEach((place, i) => {
+    const location = place && place.geometry ? place.geometry.location : null;
+    const lat = location ? Number(location.lat) : NaN;
+    const lng = location ? Number(location.lng) : NaN;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+    const serviceType = amenityType === 'fire_station' ? 'fire' : amenityType;
+    mapped.push({
+      id: `google_${amenityType}_${place.place_id || i}`,
+      type: serviceType,
+      name: String(place.name || `${serviceType} service`).trim(),
+      lat,
+      lng,
+      phone: getEmergencyNumber(amenityType),
+      address: String(place.vicinity || place.formatted_address || `${lat.toFixed(4)}, ${lng.toFixed(4)}`),
+      distance: Math.round(getDistance(userLat, userLng, lat, lng)),
+      source: 'google-places'
+    });
+  });
+
+  mapped.sort((a, b) => a.distance - b.distance);
+  return mapped;
+}
+
+function dedupeGooglePlacesResults(results) {
+  const deduped = [];
+  const seen = new Set();
+
+  (results || []).forEach((place) => {
+    const location = place && place.geometry ? place.geometry.location : null;
+    const key = String(
+      place && place.place_id
+        ? place.place_id
+        : `${place && place.name ? place.name : ''}:${location && location.lat ? location.lat : ''}:${location && location.lng ? location.lng : ''}`
+    );
+
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    deduped.push(place);
+  });
+
+  return deduped;
+}
+
+function mapGoogleCameraResults(results, userLat, userLng) {
+  const cameras = [];
+
+  (results || []).forEach((place, i) => {
+    const location = place && place.geometry ? place.geometry.location : null;
+    const lat = location ? Number(location.lat) : NaN;
+    const lng = location ? Number(location.lng) : NaN;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+    const businessStatus = String(place.business_status || '').toUpperCase();
+    const status = businessStatus === 'CLOSED_TEMPORARILY' || businessStatus === 'CLOSED_PERMANENTLY'
+      ? 'maintenance'
+      : 'active';
+
+    cameras.push({
+      id: `google_cam_${place.place_id || i}`,
+      lat,
+      lng,
+      name: String(place.name || `CCTV-relevant place #${i + 1}`),
+      status,
+      coverage: 110 + Math.floor(Math.random() * 70),
+      resolution: 'Unknown',
+      distance: Math.round(getDistance(userLat, userLng, lat, lng)),
+      source: 'google-places'
+    });
+  });
+
+  cameras.sort((a, b) => a.distance - b.distance);
+  return cameras;
+}
+
+async function fetchNearbyAmenitiesWithGoogle(lat, lng, radius = 3000) {
+  const services = { police: [], hospital: [], fire: [] };
+  const lookups = [
+    { amenityType: 'police', googleType: 'police' },
+    { amenityType: 'hospital', googleType: 'hospital' },
+    { amenityType: 'fire_station', googleType: 'fire_station' }
+  ];
+
+  for (const lookup of lookups) {
+    const places = await fetchGoogleNearbyPlaces(lat, lng, radius, {
+      type: lookup.googleType,
+      context: `places-${lookup.amenityType}`
+    });
+    const mapped = mapGoogleAmenityResults(places, lookup.amenityType, lat, lng);
+
+    if (lookup.amenityType === 'police') services.police = mapped;
+    else if (lookup.amenityType === 'hospital') services.hospital = mapped;
+    else services.fire = mapped;
+  }
+
+  return services;
+}
+
+async function fetchNearbyCamerasWithGoogle(lat, lng, radius = 2000) {
+  const keywords = ['cctv', 'surveillance'];
+  const rawResults = [];
+
+  for (const keyword of keywords) {
+    const places = await fetchGoogleNearbyPlaces(lat, lng, radius, {
+      keyword,
+      context: `places-cameras-${keyword}`
+    });
+    rawResults.push(...places);
+  }
+
+  const dedupedPlaces = dedupeGooglePlacesResults(rawResults);
+  return mapGoogleCameraResults(dedupedPlaces, lat, lng);
+}
+
+// ── Nearby Services (Google Places preferred, Overpass fallback) ────────────
 async function fetchNearbyAmenities(lat, lng, radius = 3000) {
+  if (hasGoogleApiKey()) {
+    try {
+      const googleServices = await fetchNearbyAmenitiesWithGoogle(lat, lng, radius);
+      const totalGoogleResults =
+        googleServices.police.length +
+        googleServices.hospital.length +
+        googleServices.fire.length;
+
+      if (totalGoogleResults > 0) {
+        return googleServices;
+      }
+    } catch (err) {
+      console.warn('Google Places amenities failed, falling back to Overpass:', err);
+      notifyGoogleFallback(err, 'Overpass amenities feed');
+    }
+  }
+
   const query = `
     [out:json][timeout:10];
     (
@@ -549,7 +723,7 @@ async function fetchNearbyAmenities(lat, lng, radius = 3000) {
     const { data } = await fetchOverpassJson(query);
     return parseOverpassResults(data.elements, lat, lng);
   } catch (err) {
-    console.warn('Overpass API failed, using fallback data:', err);
+    console.warn('Overpass amenities failed, using fallback data:', err);
     return { ...generateFallbackServices(lat, lng), error: 'API_FAILED' };
   }
 }
@@ -652,8 +826,20 @@ function generateFallbackServices(lat, lng) {
   return services;
 }
 
-// ── Fetch nearby CCTV / surveillance cameras from OSM ─────────
+// ── Nearby Surveillance Signals (Google Places preferred, Overpass fallback) ─
 async function fetchNearbyCameras(lat, lng, radius = 2000) {
+  if (hasGoogleApiKey()) {
+    try {
+      const googleCameras = await fetchNearbyCamerasWithGoogle(lat, lng, radius);
+      if (googleCameras.length > 0) {
+        return googleCameras;
+      }
+    } catch (err) {
+      console.warn('Google Places camera lookup failed, falling back to Overpass:', err);
+      notifyGoogleFallback(err, 'OpenStreetMap camera feed');
+    }
+  }
+
   const query = `
     [out:json][timeout:10];
     (
@@ -679,7 +865,7 @@ async function fetchNearbyCameras(lat, lng, radius = 2000) {
     cameras.sort((a, b) => a.distance - b.distance);
     return cameras;
   } catch (err) {
-    console.warn('Camera fetch failed, generating estimates:', err);
+    console.warn('Camera feeds failed, generating estimates:', err);
     const fallback = generateFallbackCameras(lat, lng);
     return { cameras: fallback, error: 'API_FAILED' };
   }

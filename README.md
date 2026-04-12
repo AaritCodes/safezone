@@ -1,6 +1,6 @@
 # 🛡️ SafeZone - Real-Time Area Safety Monitor
 
-SafeZone is a comprehensive web application that provides real-time safety analysis for any location worldwide. Using OpenStreetMap data, it evaluates area safety based on proximity to emergency services, CCTV coverage, time of day, and other critical factors.
+SafeZone is a comprehensive web application that provides real-time safety analysis for any location worldwide. It uses Google Maps Platform data when an API key is configured, with OpenStreetMap feeds as resilient fallback sources.
 
 ![SafeZone](https://img.shields.io/badge/version-2.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -15,7 +15,7 @@ SafeZone is a comprehensive web application that provides real-time safety analy
 - **📊 Safety Scoring**: Dynamic 0-100 safety score based on multiple factors
 - **🕐 Time-Based Analysis**: See how safety changes throughout the day
 - **📍 Location Search**: Search any location worldwide
-- **🎯 Real-Time Data**: Fetches live data from OpenStreetMap APIs
+- **🎯 Real-Time Data**: Google Maps Platform (primary) with OpenStreetMap fallback
 
 ### Safety Analysis Includes
 - **🚔 Police Stations**: Distance and count of nearby police stations
@@ -169,14 +169,14 @@ The safety score (0-100) is calculated based on:
 - **🚔 Police Stations**: Blue markers with coverage info
 - **🏥 Hospitals**: Red markers with distance
 - **🚒 Fire Stations**: Orange markers with response areas
-- **Real-Time Data**: Fetched from Overpass API
+- **Real-Time Data**: Fetched from Google Places API (fallback to Overpass)
 - **Fallback System**: Estimated locations if API fails
 
 ### 4. CCTV Cameras
 - **📹 Surveillance Coverage**: Green circles show camera range
 - **Status Indicators**: Active vs. maintenance
 - **Coverage Radius**: Visual representation of monitored areas
-- **Source Verification**: OpenStreetMap verified or estimated
+- **Source Verification**: Google Places, OpenStreetMap, or estimated fallback
 
 ### 5. Time-Based Analysis
 - **24-Hour Slider**: Adjust from 12 AM to 11 PM
@@ -319,18 +319,20 @@ const policeBonus = Math.min(20, policeCount * 6); // Adjust multiplier
 - **Usage**: Location search and address lookup
 
 ### Overpass API
-- **Purpose**: Fetch real emergency services and cameras
+- **Purpose**: Fallback provider for emergency services and camera feeds
 - **Endpoint**: `https://overpass-api.de/api/interpreter`
 - **Rate Limit**: Reasonable use policy
-- **Usage**: Police, hospitals, fire stations, CCTV data
+- **Usage**: Used when Google Places is unavailable or has no results
 
 ### Google Maps Platform APIs (Optional)
-- **Purpose**: Higher quality geocoding, reverse geocoding, turn-by-turn directions, IP-based location
+- **Purpose**: Primary provider for geocoding, reverse geocoding, turn-by-turn directions, IP-based location, nearby services, and CCTV-relevant place signals
 - **Endpoints**:
    - `https://maps.googleapis.com/maps/api/geocode/json`
    - `https://maps.googleapis.com/maps/api/directions/json`
+   - `https://maps.googleapis.com/maps/api/place/nearbysearch/json`
    - `https://www.googleapis.com/geolocation/v1/geolocate`
 - **Fallbacks**:
+   - Nearby services/camera signals -> Overpass
    - Geocoding/reverse geocoding -> Nominatim
    - Routing -> OSRM
    - Approximate location -> map center fallback
@@ -453,8 +455,9 @@ if (score >= 80) return { label: 'Very Safe', class: 'very-safe', icon: '🟢' }
 - **LocalStorage only for favorites**
 
 ### Data Sources
+- **Google Maps Platform**: Primary data source when API key is configured
 - **OpenStreetMap**: Community-contributed map data
-- **Overpass API**: Real-time OSM data queries
+- **Overpass API**: Fallback OSM query service for resilient results
 - **Nominatim**: OSM geocoding service
 - **All data is public and open-source**
 
@@ -589,8 +592,9 @@ SOFTWARE.
 ## 🙏 Acknowledgments
 
 - **OpenStreetMap**: For providing free, open map data
+- **Google Maps Platform**: For geospatial APIs and nearby place intelligence
 - **Leaflet.js**: For the excellent mapping library
-- **Overpass API**: For real-time OSM data access
+- **Overpass API**: For fallback OSM data access
 - **Nominatim**: For geocoding services
 - **Inter Font**: For beautiful typography
 - **Community Contributors**: For testing and feedback

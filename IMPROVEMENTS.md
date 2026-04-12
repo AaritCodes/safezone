@@ -5,10 +5,24 @@ This document outlines all the enhancements made to the SafeZone project based o
 
 ---
 
+## 0. Google Maps Primary Integration ✅
+
+### Added Features:
+- **Google Places First**: Nearby police, hospitals, fire stations, and CCTV-relevant places now use Google Places API as the primary source
+- **Automatic Fallback**: Overpass is now a fallback provider when Google is unavailable or returns no usable results
+- **Source-Aware UI**: Sidebar and popup labels now distinguish Google Places (🗺), OpenStreetMap (📡), and estimated data (⚠)
+
+### Implementation:
+- Added Google Places nearby search pipeline in `data.js`
+- Kept Overpass queries for resilience and non-breaking fallback behavior
+- Updated UI source badges and list metadata in `app.js`
+
+---
+
 ## 1. Data Source Transparency ✅
 
 ### Added Features:
-- **Data Source Indicators**: All services and cameras now show whether they're verified via OpenStreetMap (📡) or estimated (⚠)
+- **Data Source Indicators**: All services and cameras now show whether they're verified via Google Places (🗺), OpenStreetMap (📡), or estimated (⚠)
 - **API Error Notifications**: Users are notified when APIs fail and estimated data is being used
 - **Safety Score Disclaimer**: Clear disclaimer explaining that scores are estimates, not official safety ratings
 - **Heatmap Disclaimer**: Legend now includes note that heatmap shows estimated patterns, not actual crime data

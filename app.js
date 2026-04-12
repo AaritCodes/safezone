@@ -315,7 +315,9 @@ function createServicePopup(service) {
   const typeLabel = service.type.charAt(0).toUpperCase() + service.type.slice(1);
   const sourceTag = service.source === 'openstreetmap'
     ? '<div style="font-size:10px;color:#64748b;margin-top:6px;">📡 Verified via OpenStreetMap</div>'
-    : '<div style="font-size:10px;color:#eab308;margin-top:6px;">⚠ Estimated location</div>';
+    : service.source === 'google-places'
+      ? '<div style="font-size:10px;color:#0ea5e9;margin-top:6px;">🗺 Verified via Google Places</div>'
+      : '<div style="font-size:10px;color:#eab308;margin-top:6px;">⚠ Estimated location</div>';
 
   return `
     <div>
@@ -365,7 +367,9 @@ function createCameraPopup(cam) {
   const statusColor = cam.status === 'active' ? '#22c55e' : '#eab308';
   const sourceTag = cam.source === 'openstreetmap'
     ? '<div style="font-size:10px;color:#64748b;margin-top:4px;">📡 Verified via OpenStreetMap</div>'
-    : '<div style="font-size:10px;color:#eab308;margin-top:4px;">⚠ Estimated</div>';
+    : cam.source === 'google-places'
+      ? '<div style="font-size:10px;color:#0ea5e9;margin-top:4px;">🗺 Google Places nearby result</div>'
+      : '<div style="font-size:10px;color:#eab308;margin-top:4px;">⚠ Estimated</div>';
 
   return `
     <div>
@@ -708,7 +712,7 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
           <div class="service-icon" style="background: rgba(34,197,94,0.15); font-size: 18px;">📹</div>
           <div class="service-info">
             <div class="service-name">${escapeHtml(c.name)}</div>
-            <div class="service-meta">${escapeHtml(c.resolution)} • ${c.status === 'active' ? '<span style="color:#22c55e">● Online</span>' : '<span style="color:#eab308">● Maintenance</span>'}${c.source === 'openstreetmap' ? ' • 📡' : ''}</div>
+            <div class="service-meta">${escapeHtml(c.resolution)} • ${c.status === 'active' ? '<span style="color:#22c55e">● Online</span>' : '<span style="color:#eab308">● Maintenance</span>'}${c.source === 'openstreetmap' ? ' • 📡 OSM' : (c.source === 'google-places' ? ' • 🗺 Google' : ' • ⚠ Est.')}</div>
           </div>
           <div class="service-distance">${formatDistance(c.distance)}</div>
         </div>
@@ -723,7 +727,7 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
           <div class="service-icon police">🚔</div>
           <div class="service-info">
             <div class="service-name">${escapeHtml(p.name)}</div>
-            <div class="service-meta">📞 ${escapeHtml(p.phone)}${p.source === 'openstreetmap' ? ' • 📡 Verified' : ' • ⚠ Est.'}</div>
+            <div class="service-meta">📞 ${escapeHtml(p.phone)}${p.source === 'openstreetmap' ? ' • 📡 Verified' : (p.source === 'google-places' ? ' • 🗺 Google Places' : ' • ⚠ Est.')}</div>
           </div>
           <div class="service-distance">${formatDistance(p.distance)}</div>
         </div>
@@ -738,7 +742,7 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
           <div class="service-icon hospital">🏥</div>
           <div class="service-info">
             <div class="service-name">${escapeHtml(h.name)}</div>
-            <div class="service-meta">📞 ${escapeHtml(h.phone)}${h.source === 'openstreetmap' ? ' • 📡 Verified' : ' • ⚠ Est.'}</div>
+            <div class="service-meta">📞 ${escapeHtml(h.phone)}${h.source === 'openstreetmap' ? ' • 📡 Verified' : (h.source === 'google-places' ? ' • 🗺 Google Places' : ' • ⚠ Est.')}</div>
           </div>
           <div class="service-distance">${formatDistance(h.distance)}</div>
         </div>
@@ -753,7 +757,7 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
           <div class="service-icon fire">🚒</div>
           <div class="service-info">
             <div class="service-name">${escapeHtml(f.name)}</div>
-            <div class="service-meta">📞 ${escapeHtml(f.phone)}${f.source === 'openstreetmap' ? ' • 📡 Verified' : ' • ⚠ Est.'}</div>
+            <div class="service-meta">📞 ${escapeHtml(f.phone)}${f.source === 'openstreetmap' ? ' • 📡 Verified' : (f.source === 'google-places' ? ' • 🗺 Google Places' : ' • ⚠ Est.')}</div>
           </div>
           <div class="service-distance">${formatDistance(f.distance)}</div>
         </div>

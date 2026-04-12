@@ -38,7 +38,9 @@
         onkeydown="onSearchKeydown(event)"
         autocomplete="off"
       />
+      <button id="voiceSearchBtn" class="voice-btn" onclick="toggleVoiceSearch()" aria-label="Search by voice">🎤</button>
       <button class="search-btn" onclick="searchLocation()">Search</button>
+      <button class="search-btn directions-btn" onclick="startDirectionsFromInput()" aria-label="Get directions to searched location">Route</button>
     </div>
   </div>
 
@@ -59,6 +61,10 @@
     <button class="layer-btn active" data-layer="properties" onclick="toggleLayer('properties')" aria-pressed="true" aria-label="Toggle real estate properties layer">
       <span class="dot"></span>
       <span>Properties</span>
+    </button>
+    <button class="layer-btn active" data-layer="risk" onclick="toggleLayer('risk')" aria-pressed="true" aria-label="Toggle crime and accident risk layer">
+      <span class="dot"></span>
+      <span>Risk</span>
     </button>
   </div>
 
@@ -112,11 +118,50 @@
     </div>
   </div>
 
+  <!-- Directions Panel -->
+  <div id="directionsPanel" class="directions-panel" role="region" aria-label="Turn-by-turn directions panel">
+    <div class="directions-header">
+      <h3>Turn-by-Turn Directions</h3>
+      <button class="close-btn" onclick="closeDirectionsPanel()" aria-label="Close directions panel">✕</button>
+    </div>
+    <div id="directionsContent" class="directions-body">
+      <p class="directions-empty">Search a destination and click Route to start navigation.</p>
+    </div>
+  </div>
+
   <!-- SafeHome Finder -->
   <div class="safehome-panel">
     <button id="findSafeHomesBtn" class="safehome-btn" onclick="findSafestHomes()" aria-label="Find Safest Homes Nearby">
       🏠 Find Safest Homes
     </button>
+  </div>
+
+  <!-- Emergency Contacts -->
+  <div class="contacts-panel">
+    <button id="contactsBtn" class="contacts-btn" onclick="openEmergencyContacts()" aria-label="Open emergency contacts">
+      📱 Emergency Contacts
+    </button>
+  </div>
+
+  <div id="contactsModal" class="contacts-modal" role="dialog" aria-modal="true" aria-label="Emergency contacts manager">
+    <div class="contacts-card">
+      <div class="contacts-header">
+        <h3>Emergency Contacts</h3>
+        <button class="close-btn" onclick="closeEmergencyContacts()" aria-label="Close emergency contacts">✕</button>
+      </div>
+
+      <form class="contacts-form" onsubmit="saveEmergencyContact(event)">
+        <input id="contactNameInput" type="text" placeholder="Contact name" maxlength="40" required />
+        <input id="contactPhoneInput" type="tel" placeholder="Phone number" maxlength="20" required />
+        <button type="submit" class="search-btn">Add Contact</button>
+      </form>
+
+      <div id="contactsList" class="contacts-list"></div>
+
+      <button class="sos-btn" onclick="triggerSOSCall()" aria-label="Call primary emergency contact">
+        🆘 SOS Call Primary Contact
+      </button>
+    </div>
   </div>
 
   <!-- Edge AI Guardian Tab -->

@@ -51,6 +51,22 @@ const CACHE_DURATION = 300000; // 5 minutes
 // ── Request Throttling ────────────────────────────────────────
 let lastRequestTime = 0;
 const REQUEST_DELAY = 1000; // 1 second between requests
+const RISK_MODEL_STORAGE_KEY = 'safezoneRiskModel';
+
+const THEFT_CATEGORIES = new Set([
+  'burglary',
+  'robbery',
+  'shoplifting',
+  'theft-from-the-person',
+  'vehicle-crime',
+  'bicycle-theft'
+]);
+
+const VIOLENT_CATEGORIES = new Set([
+  'violence-and-sexual-offences',
+  'public-order',
+  'possession-of-weapons'
+]);
 
 async function throttledFetch(url, options) {
   const now = Date.now();
@@ -301,8 +317,260 @@ async function reverseGeocode(lat, lng) {
   }
 }
 
+// ── Public Safety Intelligence (Crime + Accident Signals) ────
+function isLikelyUK(lat, lng) {
+  return lat >= 49 && lat <= 61 && lng >= -9 && lng <= 3;
+}
+
+function loadRiskModel() {
+  try {
+    const raw = localStorage.getItem(RISK_MODEL_STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (err) {
+    console.warn('Risk model cache load failed:', err);
+  }
+
+  return {
+    samples: 0,
+    avgObserved: 8,
+    avgTheft: 1,
+    avgViolent: 1,
+    avgAccident: 2,
+    updatedAt: Date.now()
+  };
+}
+
+function saveRiskModel(model) {
+  try {
+    localStorage.setItem(RISK_MODEL_STORAGE_KEY, JSON.stringify(model));
+  } catch (err) {
+    console.warn('Risk model cache save failed:', err);
+  }
+}
+
+function trainRiskModel(crimeData, accidentData) {
+  const model = loadRiskModel();
+  const theftSignal = crimeData.theftCount * 2.2;
+  const violentSignal = crimeData.violentCount * 1.6;
+  const accidentSignal = accidentData.weightedRisk;
+  const observed = theftSignal + violentSignal + accidentSignal;
+
+  model.samples += 1;
+  const alpha = model.samples < 6 ? 0.35 : 0.18;
+  model.avgObserved = model.avgObserved * (1 - alpha) + observed * alpha;
+  model.avgTheft = model.avgTheft * (1 - alpha) + crimeData.theftCount * alpha;
+  model.avgViolent = model.avgViolent * (1 - alpha) + crimeData.violentCount * alpha;
+  model.avgAccident = model.avgAccident * (1 - alpha) + accidentData.weightedRisk * alpha;
+  model.updatedAt = Date.now();
+  saveRiskModel(model);
+
+  const delta = observed - model.avgObserved;
+  let penalty = 0;
+
+  if (observed > 0) {
+    penalty = Math.round(observed * 0.8 + Math.max(0, delta) * 1.4);
+    penalty = Math.max(0, Math.min(24, penalty));
+  }
+
+  const factors = [];
+  if (crimeData.theftCount > 0) factors.push(`${crimeData.theftCount} recent theft-related reports`);
+  if (crimeData.violentCount > 0) factors.push(`${crimeData.violentCount} recent violent/public-order reports`);
+  if (accidentData.hazardCount > 0) factors.push(`${accidentData.hazardCount} mapped road hazard tags nearby`);
+  if (accidentData.signalCount > 0) factors.push(`${accidentData.signalCount} dense traffic-conflict points`);
+
+  if (factors.length === 0) {
+    factors.push('No elevated public incident pressure detected in current feeds');
+  }
+
+  return {
+    penalty,
+    factors,
+    baseline: model.avgObserved
+  };
+}
+
+async function fetchRecentCrimeSignals(lat, lng) {
+  // UK Police Data API is used as a public crime feed where coverage is available.
+  if (!isLikelyUK(lat, lng)) {
+    return {
+      source: 'public-crime-feed-unavailable',
+      month: 'latest',
+      total: 0,
+      theftCount: 0,
+      violentCount: 0,
+      hotspots: []
+    };
+  }
+
+  try {
+    const response = await throttledFetch(`https://data.police.uk/api/crimes-street/all-crime?lat=${lat}&lng=${lng}`);
+    if (!response.ok) {
+      throw new Error(`Crime API returned ${response.status}`);
+    }
+
+    const crimes = await response.json();
+    const theftCount = crimes.filter(c => THEFT_CATEGORIES.has(c.category)).length;
+    const violentCount = crimes.filter(c => VIOLENT_CATEGORIES.has(c.category)).length;
+
+    const hotspots = crimes
+      .filter(c => c.location && c.location.latitude && c.location.longitude)
+      .slice(0, 30)
+      .map(c => ({
+        lat: parseFloat(c.location.latitude),
+        lng: parseFloat(c.location.longitude),
+        title: c.category.replace(/-/g, ' '),
+        type: THEFT_CATEGORIES.has(c.category) ? 'theft' : (VIOLENT_CATEGORIES.has(c.category) ? 'violent' : 'crime'),
+        source: 'UK Police Data'
+      }));
+
+    return {
+      source: 'uk-police-data',
+      month: crimes[0] && crimes[0].month ? crimes[0].month : 'latest',
+      total: crimes.length,
+      theftCount,
+      violentCount,
+      hotspots
+    };
+  } catch (err) {
+    console.warn('Crime signal fetch failed:', err);
+    return {
+      source: 'crime-feed-error',
+      month: 'latest',
+      total: 0,
+      theftCount: 0,
+      violentCount: 0,
+      hotspots: [],
+      error: 'API_FAILED'
+    };
+  }
+}
+
+async function fetchAccidentRiskSignals(lat, lng, radius = 2000) {
+  const query = `
+    [out:json][timeout:10];
+    (
+      node["hazard"~"accident|dangerous_curve|slippery|falling_rocks"](around:${radius},${lat},${lng});
+      way["hazard"~"accident|dangerous_curve|slippery|falling_rocks"](around:${radius},${lat},${lng});
+      node["accident"](around:${radius},${lat},${lng});
+      way["accident"](around:${radius},${lat},${lng});
+      node["highway"="traffic_signals"](around:${Math.round(radius * 0.8)},${lat},${lng});
+    );
+    out center body;
+  `;
+
+  try {
+    const response = await throttledFetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'data=' + encodeURIComponent(query)
+    });
+
+    if (!response.ok) {
+      throw new Error(`Accident signal API returned ${response.status}`);
+    }
+
+    const data = await response.json();
+    const hotspots = [];
+    let hazardCount = 0;
+    let signalCount = 0;
+
+    (data.elements || []).forEach((el, i) => {
+      const elLat = el.lat || (el.center && el.center.lat);
+      const elLng = el.lon || (el.center && el.center.lon);
+      if (!elLat || !elLng) return;
+
+      const tags = el.tags || {};
+      const isSignal = tags.highway === 'traffic_signals';
+      const label = tags.hazard || tags.accident || (isSignal ? 'traffic_signals' : 'risk_signal');
+
+      if (isSignal) signalCount += 1;
+      else hazardCount += 1;
+
+      hotspots.push({
+        lat: elLat,
+        lng: elLng,
+        title: label.replace(/_/g, ' '),
+        type: isSignal ? 'traffic' : 'accident',
+        source: 'OpenStreetMap'
+      });
+    });
+
+    const weightedRisk = hazardCount * 2 + signalCount * 0.25;
+
+    return {
+      source: 'osm-road-signals',
+      hazardCount,
+      signalCount,
+      weightedRisk,
+      hotspots: hotspots.slice(0, 40)
+    };
+  } catch (err) {
+    console.warn('Accident signal fetch failed:', err);
+    return {
+      source: 'accident-feed-error',
+      hazardCount: 0,
+      signalCount: 0,
+      weightedRisk: 0,
+      hotspots: [],
+      error: 'API_FAILED'
+    };
+  }
+}
+
+async function fetchPublicSafetyRisk(lat, lng) {
+  try {
+    const [crimeData, accidentData] = await Promise.all([
+      fetchRecentCrimeSignals(lat, lng),
+      fetchAccidentRiskSignals(lat, lng)
+    ]);
+
+    const modelOutput = trainRiskModel(crimeData, accidentData);
+
+    let confidence = 'low';
+    if (crimeData.source === 'uk-police-data') confidence = 'high';
+    else if (accidentData.hotspots.length > 0) confidence = 'medium';
+
+    return {
+      theftCount: crimeData.theftCount,
+      violentCount: crimeData.violentCount,
+      totalCrime: crimeData.total,
+      accidentHotspots: accidentData.hazardCount,
+      conflictPoints: accidentData.signalCount,
+      penalty: modelOutput.penalty,
+      factors: modelOutput.factors,
+      baseline: modelOutput.baseline,
+      confidence,
+      month: crimeData.month,
+      hotspots: [...crimeData.hotspots, ...accidentData.hotspots].slice(0, 50),
+      sources: {
+        crime: crimeData.source,
+        accidents: accidentData.source
+      },
+      error: crimeData.error || accidentData.error
+    };
+  } catch (err) {
+    console.warn('Public safety risk fetch failed:', err);
+    return {
+      theftCount: 0,
+      violentCount: 0,
+      totalCrime: 0,
+      accidentHotspots: 0,
+      conflictPoints: 0,
+      penalty: 0,
+      factors: ['Public risk feeds unavailable, using base model only'],
+      confidence: 'low',
+      hotspots: [],
+      sources: {
+        crime: 'unavailable',
+        accidents: 'unavailable'
+      },
+      error: 'API_FAILED'
+    };
+  }
+}
+
 // ── Dynamic Safety Score Algorithm (Enhanced) ─────────────────
-function calculateSafetyScore(hour, services, cameras, areaInfo) {
+function calculateSafetyScore(hour, services, cameras, areaInfo, riskData = null) {
   let score = 50; // Base score
   let factors = []; // Track what influenced the score
 
@@ -444,12 +712,24 @@ function calculateSafetyScore(hour, services, cameras, areaInfo) {
     }
   }
 
+  // Factor 10: Public crime + accident intelligence
+  if (riskData) {
+    const riskPenalty = Math.max(0, Math.round(riskData.penalty || 0));
+    if (riskPenalty > 0) {
+      score -= riskPenalty;
+      factors.push(`-${riskPenalty} (recent theft / accident risk signals)`);
+    } else if (riskData.confidence === 'high' || riskData.confidence === 'medium') {
+      score += 3;
+      factors.push('+3 (low recent public incident pressure)');
+    }
+  }
+
   const finalScore = Math.max(0, Math.min(100, Math.round(score)));
   return { score: finalScore, factors };
 }
 
 // Generate risk factors based on the computed data
-function generateRiskFactors(hour, services, cameras, areaInfo) {
+function generateRiskFactors(hour, services, cameras, areaInfo, riskData = null) {
   const risks = [];
   const features = [];
   
@@ -498,6 +778,21 @@ function generateRiskFactors(hour, services, cameras, areaInfo) {
     features.push(`${activeCount} active surveillance cameras`);
   }
 
+  if (riskData) {
+    if (riskData.theftCount > 0) risks.push(`${riskData.theftCount} recent theft-related reports`);
+    if (riskData.violentCount > 0) risks.push(`${riskData.violentCount} recent violent/public-order reports`);
+    if (riskData.accidentHotspots > 0) risks.push(`${riskData.accidentHotspots} mapped road hazard points nearby`);
+    if (riskData.conflictPoints > 0) risks.push(`${riskData.conflictPoints} dense traffic-conflict nodes nearby`);
+
+    if ((riskData.confidence === 'high' || riskData.confidence === 'medium') && (riskData.penalty || 0) === 0) {
+      features.push('Low pressure from recent public incident feeds');
+    }
+
+    if (riskData.confidence === 'low') {
+      risks.push('Limited official public incident coverage for this location');
+    }
+  }
+
   // Ensure minimum entries
   if (features.length === 0) features.push('General urban area');
   if (risks.length === 0) risks.push('No major risks identified');
@@ -509,6 +804,90 @@ function generateRiskFactors(hour, services, cameras, areaInfo) {
   }
 
   return { risks, features };
+}
+
+// ── Routing Engine (Turn-by-Turn via OSRM) ───────────────────
+function formatRouteInstruction(step) {
+  const type = step.maneuver && step.maneuver.type ? step.maneuver.type : 'continue';
+  const modifier = step.maneuver && step.maneuver.modifier ? step.maneuver.modifier : '';
+  const road = step.name ? ` onto ${step.name}` : '';
+
+  if (type === 'depart') return `Start and head ${modifier || 'forward'}${road}`.trim();
+  if (type === 'arrive') return 'You have arrived at your destination';
+  if (type === 'roundabout' || type === 'rotary') return `Enter roundabout and continue${road}`;
+  if (type === 'fork') return `Keep ${modifier || 'ahead'}${road}`;
+  if (type === 'merge') return `Merge ${modifier || 'ahead'}${road}`;
+  if (type === 'on ramp') return `Take the ramp ${modifier || ''}${road}`.trim();
+  if (type === 'off ramp') return `Take the exit ${modifier || ''}${road}`.trim();
+  if (type === 'turn') return `Turn ${modifier || ''}${road}`.trim();
+  if (type === 'end of road') return `At end of road, turn ${modifier || ''}${road}`.trim();
+
+  return `Continue ${modifier || 'ahead'}${road}`.trim();
+}
+
+async function fetchRouteDirections(fromLat, fromLng, toLat, toLng, profile = 'driving') {
+  const routeProfile = profile === 'walking' ? 'foot' : 'driving';
+  const url = `https://router.project-osrm.org/route/v1/${routeProfile}/${fromLng},${fromLat};${toLng},${toLat}?overview=full&geometries=geojson&steps=true&alternatives=false`;
+
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Routing API returned ${response.status}`);
+    }
+
+    const data = await response.json();
+    if (!data.routes || data.routes.length === 0) {
+      throw new Error('No route returned');
+    }
+
+    const route = data.routes[0];
+    const leg = route.legs && route.legs[0] ? route.legs[0] : { steps: [] };
+
+    const path = route.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+    const steps = (leg.steps || []).map((step, i) => {
+      const maneuverLoc = step.maneuver && step.maneuver.location ? step.maneuver.location : [fromLng, fromLat];
+      const instruction = formatRouteInstruction(step);
+
+      return {
+        index: i,
+        instruction,
+        voiceInstruction: `${instruction}. Continue for ${formatDistance(Math.round(step.distance || 0))}.`,
+        distance: Math.round(step.distance || 0),
+        duration: Math.round(step.duration || 0),
+        lat: maneuverLoc[1],
+        lng: maneuverLoc[0]
+      };
+    });
+
+    return {
+      source: 'osrm',
+      distance: Math.round(route.distance),
+      duration: Math.round(route.duration),
+      path,
+      steps
+    };
+  } catch (err) {
+    console.warn('Route fetch failed, using fallback path:', err);
+    const directDistance = Math.round(getDistance(fromLat, fromLng, toLat, toLng));
+    return {
+      source: 'fallback',
+      distance: directDistance,
+      duration: Math.round(directDistance / 13),
+      path: [[fromLat, fromLng], [toLat, toLng]],
+      steps: [
+        {
+          index: 0,
+          instruction: 'Routing service unavailable. Follow direct path to destination.',
+          voiceInstruction: 'Routing service is unavailable. Follow the highlighted direct path to destination.',
+          distance: directDistance,
+          duration: Math.round(directDistance / 13),
+          lat: toLat,
+          lng: toLng
+        }
+      ],
+      error: 'API_FAILED'
+    };
+  }
 }
 
 // ── Heatmap Data Points (with caching) ───────────────────────
@@ -639,4 +1018,13 @@ function formatTime(hour) {
 function formatDistance(meters) {
   if (meters < 1000) return `${meters}m`;
   return `${(meters / 1000).toFixed(1)} km`;
+}
+
+function formatDuration(seconds) {
+  const mins = Math.round(seconds / 60);
+  if (mins < 60) return `${mins} min`;
+  const hrs = Math.floor(mins / 60);
+  const rem = mins % 60;
+  if (rem === 0) return `${hrs} hr`;
+  return `${hrs} hr ${rem} min`;
 }

@@ -183,6 +183,39 @@ html, body {
   transform: scale(1.03);
 }
 
+.search-btn.directions-btn {
+  background: linear-gradient(135deg, #0284c7, #0ea5e9);
+}
+
+.search-btn.directions-btn:hover {
+  background: linear-gradient(135deg, #0369a1, #0284c7);
+}
+
+.voice-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: 1px solid var(--border-glass);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+  font-size: 16px;
+  cursor: pointer;
+  transition: var(--transition);
+  flex-shrink: 0;
+}
+
+.voice-btn:hover {
+  border-color: var(--accent-light);
+  background: rgba(99, 102, 241, 0.2);
+}
+
+.voice-btn.active {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #fecaca;
+  box-shadow: 0 0 14px rgba(239, 68, 68, 0.35);
+}
+
 /* ── SafeHome Finder ───────────────────────────────────────── */
 .safehome-panel {
   position: fixed;
@@ -214,6 +247,333 @@ html, body {
   transform: translateY(-2px);
   box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
   background: linear-gradient(135deg, rgba(30, 36, 51, 0.95), var(--accent));
+}
+
+.contacts-panel {
+  position: fixed;
+  top: 165px;
+  right: 20px;
+  z-index: 1000;
+  animation: slideDown 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.15s both;
+}
+
+.contacts-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 16px;
+  background: var(--bg-glass);
+  border: 1px solid var(--border-glass);
+  color: var(--text-primary);
+  border-radius: 50px;
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  backdrop-filter: blur(20px);
+  transition: var(--transition);
+}
+
+.contacts-btn:hover {
+  border-color: rgba(34, 197, 94, 0.5);
+  box-shadow: 0 6px 18px rgba(34, 197, 94, 0.25);
+  transform: translateY(-2px);
+}
+
+.directions-panel {
+  position: fixed;
+  right: 20px;
+  bottom: 110px;
+  width: min(420px, calc(100% - 40px));
+  max-height: 52vh;
+  background: var(--bg-glass);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(24px);
+  z-index: 1000;
+  transform: translateY(30px);
+  opacity: 0;
+  pointer-events: none;
+  transition: var(--transition);
+  display: flex;
+  flex-direction: column;
+}
+
+.directions-panel.open {
+  transform: translateY(0);
+  opacity: 1;
+  pointer-events: all;
+}
+
+.directions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-glass);
+}
+
+.directions-header h3 {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.directions-body {
+  padding: 14px 16px;
+  overflow-y: auto;
+}
+
+.directions-empty {
+  font-size: 13px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 20px 0;
+}
+
+.directions-summary {
+  padding: 10px;
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  margin-bottom: 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.directions-destination {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.directions-stats {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.directions-actions {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.directions-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.direction-step {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-glass);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.direction-step.active {
+  border-color: rgba(14, 165, 233, 0.7);
+  background: rgba(14, 165, 233, 0.12);
+}
+
+.direction-step-index {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(99, 102, 241, 0.18);
+  color: var(--accent-light);
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.direction-instruction {
+  font-size: 12px;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.direction-meta {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.contacts-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: var(--transition);
+}
+
+.contacts-modal.open {
+  opacity: 1;
+  pointer-events: all;
+}
+
+.contacts-card {
+  width: min(460px, calc(100% - 28px));
+  max-height: 80vh;
+  overflow: auto;
+  background: var(--bg-glass);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius);
+  backdrop-filter: blur(24px);
+  box-shadow: var(--shadow-lg);
+  padding: 16px;
+}
+
+.contacts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.contacts-header h3 {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.contacts-form {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.contacts-form input {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-xs);
+  padding: 10px 12px;
+  color: var(--text-primary);
+  font-family: var(--font);
+  outline: none;
+}
+
+.contacts-form input:focus {
+  border-color: var(--accent-light);
+}
+
+.contacts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.contacts-empty {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 12px 0;
+}
+
+.contact-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-xs);
+  background: rgba(255, 255, 255, 0.03);
+  padding: 10px;
+}
+
+.contact-meta {
+  min-width: 0;
+}
+
+.contact-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.contact-phone {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.contact-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.contact-action {
+  border: 1px solid var(--border-glass);
+  border-radius: 20px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: var(--font);
+  cursor: pointer;
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+  transition: var(--transition);
+}
+
+.contact-action.call:hover {
+  border-color: rgba(34, 197, 94, 0.5);
+  color: #86efac;
+}
+
+.contact-action.remove:hover {
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #fca5a5;
+}
+
+.sos-btn {
+  width: 100%;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 11px 12px;
+  color: white;
+  font-weight: 800;
+  font-family: var(--font);
+  background: linear-gradient(135deg, #dc2626, #ef4444);
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.sos-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(239, 68, 68, 0.35);
+}
+
+.route-now-btn {
+  margin-top: 8px;
+  width: 100%;
+  padding: 8px 16px;
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  border-radius: 20px;
+  color: #bae6fd;
+  background: rgba(14, 165, 233, 0.12);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.route-now-btn:hover {
+  background: rgba(14, 165, 233, 0.2);
+  border-color: rgba(14, 165, 233, 0.7);
 }
 
 /* ── Sidebar ───────────────────────────────────────────────── */
@@ -902,6 +1262,15 @@ html, body {
   box-shadow: 0 8px 24px rgba(239, 68, 68, 0.35);
 }
 
+.emergency-btn.secondary {
+  margin-top: 8px;
+  background: linear-gradient(135deg, #0369a1, #0284c7);
+}
+
+.emergency-btn.secondary:hover {
+  box-shadow: 0 8px 24px rgba(2, 132, 199, 0.35);
+}
+
 /* ── Loading Overlay ───────────────────────────────────────── */
 .loading-overlay {
   position: fixed;
@@ -966,6 +1335,28 @@ html, body {
   .layer-controls {
     top: 70px;
     right: 12px;
+  }
+
+  .safehome-panel {
+    top: 128px;
+    right: 12px;
+  }
+
+  .contacts-panel {
+    top: 178px;
+    right: 12px;
+  }
+
+  .contacts-btn {
+    padding: 10px 12px;
+    font-size: 12px;
+  }
+
+  .directions-panel {
+    right: 12px;
+    bottom: 88px;
+    width: calc(100% - 24px);
+    max-height: 46vh;
   }
   
   .layer-btn span:not(.dot) {
@@ -1134,6 +1525,7 @@ html, body {
 .service-card:focus,
 .layer-btn:focus,
 .search-btn:focus,
+.voice-btn:focus,
 .close-btn:focus,
 .emergency-btn:focus,
 .favorite-btn:focus {

@@ -452,8 +452,14 @@ const heatmapCache = new Map();
 const CACHE_DURATION = 300000; // 5 minutes
 
 // ── Request Throttling ────────────────────────────────────────
-let lastRequestTime = 0;
-const REQUEST_DELAY = 1000; // 1 second between requests
+const REQUEST_DEFAULT_DELAY_MS = 80;
+const REQUEST_DELAY_BY_HOST_MS = {
+  'nominatim.openstreetmap.org': 1000,
+  'overpass-api.de': 650,
+  'overpass.kumi.systems': 650,
+  'lz4.overpass-api.de': 650
+};
+const requestHostTimestamps = new Map();
 const RISK_MODEL_STORAGE_KEY = 'safezoneRiskModel';
 const FETCH_TIMEOUT_MS = 12000;
 const OVERPASS_ENDPOINTS = [
@@ -479,13 +485,44 @@ const VIOLENT_CATEGORIES = new Set([
   'possession-of-weapons'
 ]);
 
-async function throttledFetch(url, options) {
-  const now = Date.now();
-  const timeSinceLastRequest = now - lastRequestTime;
-  if (timeSinceLastRequest < REQUEST_DELAY) {
-    await new Promise(resolve => setTimeout(resolve, REQUEST_DELAY - timeSinceLastRequest));
+function getThrottleHostKey(url) {
+  const raw = typeof url === 'string'
+    ? url
+    : (url && typeof url.url === 'string' ? url.url : '');
+
+  if (!raw) return 'default';
+
+  try {
+    const base = typeof window !== 'undefined' && window.location && window.location.href
+      ? window.location.href
+      : 'https://safezone.local';
+    const parsed = new URL(raw, base);
+    return String(parsed.hostname || 'default').toLowerCase();
+  } catch (err) {
+    return 'default';
   }
-  lastRequestTime = Date.now();
+}
+
+function getRequestDelayMsForHost(hostKey) {
+  if (REQUEST_DELAY_BY_HOST_MS[hostKey]) {
+    return REQUEST_DELAY_BY_HOST_MS[hostKey];
+  }
+  return REQUEST_DEFAULT_DELAY_MS;
+}
+
+async function throttledFetch(url, options) {
+  const hostKey = getThrottleHostKey(url);
+  const delayMs = getRequestDelayMsForHost(hostKey);
+  const now = Date.now();
+  const lastRequestAt = requestHostTimestamps.get(hostKey) || 0;
+  const elapsed = now - lastRequestAt;
+  const waitMs = delayMs - elapsed;
+
+  if (waitMs > 0) {
+    await new Promise(resolve => setTimeout(resolve, waitMs));
+  }
+
+  requestHostTimestamps.set(hostKey, Date.now());
   return fetch(url, options);
 }
 
@@ -656,17 +693,24 @@ async function fetchNearbyAmenitiesWithGoogle(lat, lng, radius = 3000) {
     { amenityType: 'fire_station', googleType: 'fire_station' }
   ];
 
-  for (const lookup of lookups) {
-    const places = await fetchGoogleNearbyPlaces(lat, lng, radius, {
-      type: lookup.googleType,
-      context: `places-${lookup.amenityType}`
-    });
+  const lookupResults = await Promise.all(
+    lookups.map(async (lookup) => {
+      const places = await fetchGoogleNearbyPlaces(lat, lng, radius, {
+        type: lookup.googleType,
+        context: `places-${lookup.amenityType}`
+      });
+
+      return { lookup, places };
+    })
+  );
+
+  lookupResults.forEach(({ lookup, places }) => {
     const mapped = mapGoogleAmenityResults(places, lookup.amenityType, lat, lng);
 
     if (lookup.amenityType === 'police') services.police = mapped;
     else if (lookup.amenityType === 'hospital') services.hospital = mapped;
     else services.fire = mapped;
-  }
+  });
 
   return services;
 }
@@ -675,13 +719,16 @@ async function fetchNearbyCamerasWithGoogle(lat, lng, radius = 2000) {
   const keywords = ['cctv', 'surveillance'];
   const rawResults = [];
 
-  for (const keyword of keywords) {
-    const places = await fetchGoogleNearbyPlaces(lat, lng, radius, {
+  const keywordResults = await Promise.all(
+    keywords.map((keyword) => fetchGoogleNearbyPlaces(lat, lng, radius, {
       keyword,
       context: `places-cameras-${keyword}`
-    });
+    }))
+  );
+
+  keywordResults.forEach((places) => {
     rawResults.push(...places);
-  }
+  });
 
   const dedupedPlaces = dedupeGooglePlacesResults(rawResults);
   return mapGoogleCameraResults(dedupedPlaces, lat, lng);
@@ -1757,8 +1804,8 @@ function getHeatmapData(hour, center = MAP_CENTER, span = 0.05) {
 
 // ── Mock Broker API (Real Estate Integration) ───────────────────
 async function fetchNearbyProperties(lat, lng, radius = 2000) {
-  // Simulate network delay for authenticity
-  await new Promise(r => setTimeout(r, 600 + Math.random() * 800));
+  // Keep a small delay so cards still feel dynamic without blocking the sidebar.
+  await new Promise(r => setTimeout(r, 120 + Math.random() * 160));
   
   const properties = [];
   const numProps = 5 + Math.floor(Math.random() * 6); // 5 to 10 properties

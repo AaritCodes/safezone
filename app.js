@@ -1307,22 +1307,42 @@ function getCurrentLocation() {
   };
 
   return new Promise((resolve) => {
+    let settled = false;
+    let fallbackTimerId = null;
+
+    const resolveOnce = (value) => {
+      if (settled) return false;
+      settled = true;
+
+      if (fallbackTimerId !== null) {
+        clearTimeout(fallbackTimerId);
+        fallbackTimerId = null;
+      }
+
+      resolve(value);
+      return true;
+    };
+
     const resolveWithGoogleApproximation = async () => {
+      if (settled) return true;
       if (typeof fetchApproximateLocationFromGoogle !== 'function') return false;
 
       try {
         const approx = await fetchApproximateLocationFromGoogle();
+        if (settled) return true;
+
         if (approx && Number.isFinite(approx.lat) && Number.isFinite(approx.lng)) {
           const accuracyNote = approx.accuracy
             ? ` (~${Math.round(approx.accuracy)}m accuracy)`
             : '';
           showNotification(`Using approximate Google location${accuracyNote} as start point.`, 'warning', 4200);
-          resolve({ lat: approx.lat, lng: approx.lng, source: 'google-approximate' });
-          return true;
+          return resolveOnce({ lat: approx.lat, lng: approx.lng, source: 'google-approximate' });
         }
       } catch (err) {
-        console.warn('Google approximate location failed:', err);
-        notifyGoogleFallback(err, 'map center location fallback');
+        if (!settled) {
+          console.warn('Google approximate location failed:', err);
+          notifyGoogleFallback(err, 'map center location fallback');
+        }
       }
 
       return false;
@@ -1333,16 +1353,28 @@ function getCurrentLocation() {
         if (resolvedFromGoogle) return;
 
         showNotification('Geolocation is unavailable. Using current map center as start point.', 'warning', 4000);
-        resolve(mapCenterFallback);
+        resolveOnce(mapCenterFallback);
       });
       return;
     }
 
+    // Do not block route startup for long geolocation timeouts.
+    fallbackTimerId = setTimeout(() => {
+      resolveWithGoogleApproximation().then((resolvedFromGoogle) => {
+        if (resolvedFromGoogle) return;
+        showNotification('Location lookup is slow. Using current map center as start point.', 'warning', 3600);
+        resolveOnce(mapCenterFallback);
+      });
+    }, 3200);
+
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, source: 'device' });
+        if (settled) return;
+        resolveOnce({ lat: pos.coords.latitude, lng: pos.coords.longitude, source: 'device' });
       },
       async (error) => {
+        if (settled) return;
+
         const resolvedFromGoogle = await resolveWithGoogleApproximation();
         if (resolvedFromGoogle) return;
 
@@ -1357,12 +1389,12 @@ function getCurrentLocation() {
         }
 
         showNotification(`${message} Using current map center as start point.`, 'warning', 4000);
-        resolve(mapCenterFallback);
+        resolveOnce(mapCenterFallback);
       },
       {
-        enableHighAccuracy: true,
-        timeout: 10000,
-        maximumAge: 10000
+        enableHighAccuracy: false,
+        timeout: 7000,
+        maximumAge: 15000
       }
     );
   });

@@ -103,7 +103,7 @@ async function loadAreaData(lat, lng) {
       fetchPublicSafetyRisk(lat, lng)
     ]);
 
-    if (services.error || cameras.error || areaInfo.error || riskData.error) {
+    if (services.error || cameras.error || areaInfo.error || (riskData && riskData.criticalError)) {
       hasApiErrors = true;
       showNotification('⚠️ Some feeds are unavailable. Showing best available estimates.', 'warning', 5000);
     }
@@ -414,7 +414,7 @@ async function onMapClick(e) {
       fetchPublicSafetyRisk(lat, lng)
     ]);
 
-    hasApiErrors = Boolean(services.error || cameras.error || areaInfo.error || riskData.error);
+    hasApiErrors = Boolean(services.error || cameras.error || areaInfo.error || (riskData && riskData.criticalError));
 
     lastFetchedServices = services;
     lastFetchedCameras = Array.isArray(cameras) ? cameras : (cameras.cameras || []);

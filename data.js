@@ -524,6 +524,10 @@ async function fetchPublicSafetyRisk(lat, lng) {
       fetchAccidentRiskSignals(lat, lng)
     ]);
 
+    const crimeFeedFailed = Boolean(crimeData.error);
+    const accidentFeedFailed = Boolean(accidentData.error);
+    const criticalError = crimeFeedFailed && accidentFeedFailed;
+
     const modelOutput = trainRiskModel(crimeData, accidentData);
 
     let confidence = 'low';
@@ -546,7 +550,9 @@ async function fetchPublicSafetyRisk(lat, lng) {
         crime: crimeData.source,
         accidents: accidentData.source
       },
-      error: crimeData.error || accidentData.error
+      partialError: crimeFeedFailed || accidentFeedFailed,
+      criticalError,
+      error: criticalError ? 'API_FAILED' : undefined
     };
   } catch (err) {
     console.warn('Public safety risk fetch failed:', err);
@@ -564,6 +570,8 @@ async function fetchPublicSafetyRisk(lat, lng) {
         crime: 'unavailable',
         accidents: 'unavailable'
       },
+      partialError: true,
+      criticalError: true,
       error: 'API_FAILED'
     };
   }

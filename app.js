@@ -862,19 +862,228 @@ function toggleLayer(type) {
 }
 
 // ── Search + Voice Search ─────────────────────────────────────
-async function geocodeQuery(query) {
-  const response = await fetch(
-    `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1`,
-    { headers: { 'Accept-Language': 'en' } }
-  );
+function normalizeSearchQuery(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function getCountryNameFromCode(code) {
+  const normalized = String(code || '').trim().toUpperCase();
+  if (!normalized) return '';
+
+  if (typeof Intl !== 'undefined' && typeof Intl.DisplayNames === 'function') {
+    try {
+      const regionNames = new Intl.DisplayNames(['en'], { type: 'region' });
+      const countryName = regionNames.of(normalized);
+      if (countryName) return countryName;
+    } catch (err) {
+      console.warn('Country name lookup failed:', err);
+    }
+  }
+
+  return normalized;
+}
+
+function buildGeocodeQueryVariants(query) {
+  const normalized = normalizeSearchQuery(query);
+  const variants = [];
+
+  const addVariant = (value) => {
+    const candidate = normalizeSearchQuery(value);
+    if (!candidate) return;
+
+    const key = candidate.toLowerCase();
+    if (!variants.some(item => item.toLowerCase() === key)) {
+      variants.push(candidate);
+    }
+  };
+
+  addVariant(normalized);
+
+  const cleaned = normalized.replace(/[^\w\s,.-]/g, ' ');
+  addVariant(cleaned);
+
+  const areaHint = normalizeSearchQuery(lastAreaInfo && lastAreaInfo.area);
+  const localityHint = normalizeSearchQuery(lastAreaInfo && lastAreaInfo.name);
+  const countryHint = getCountryNameFromCode(typeof currentCountryCode === 'string' ? currentCountryCode : '');
+
+  if (!normalized.includes(',')) {
+    if (areaHint) addVariant(`${normalized}, ${areaHint}`);
+    if (localityHint && localityHint.toLowerCase() !== areaHint.toLowerCase()) {
+      addVariant(`${normalized}, ${localityHint}`);
+    }
+    if (countryHint) addVariant(`${normalized}, ${countryHint}`);
+    if (areaHint) addVariant(`${normalized} near ${areaHint}`);
+  }
+
+  if (!/\b(apartment|apartments|apt|residency|residence|society|tower|condo|condominium)\b/i.test(normalized)) {
+    addVariant(`${normalized} apartment`);
+  }
+
+  return variants.slice(0, 6);
+}
+
+function buildSearchViewbox(center, delta = 0.18) {
+  if (!Array.isArray(center) || center.length < 2) return '';
+  const lat = Number(center[0]);
+  const lng = Number(center[1]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return '';
+
+  const left = (lng - delta).toFixed(6);
+  const top = (lat + delta).toFixed(6);
+  const right = (lng + delta).toFixed(6);
+  const bottom = (lat - delta).toFixed(6);
+  return `${left},${top},${right},${bottom}`;
+}
+
+function buildNominatimSearchUrl(query, options = {}) {
+  const params = new URLSearchParams({
+    format: 'jsonv2',
+    q: query,
+    limit: String(options.limit || 5),
+    addressdetails: '1',
+    dedupe: '1'
+  });
+
+  if (options.countryCode && /^[a-z]{2}$/i.test(options.countryCode)) {
+    params.set('countrycodes', String(options.countryCode).toLowerCase());
+  }
+
+  if (options.bounded && options.viewbox) {
+    params.set('viewbox', options.viewbox);
+    params.set('bounded', '1');
+  }
+
+  return `https://nominatim.openstreetmap.org/search?${params.toString()}`;
+}
+
+async function fetchNominatimCandidates(query, options = {}) {
+  const url = buildNominatimSearchUrl(query, options);
+  const request = typeof fetchWithTimeout === 'function'
+    ? fetchWithTimeout(url, { headers: { 'Accept-Language': 'en' } }, 9000)
+    : fetch(url, { headers: { 'Accept-Language': 'en' } });
+
+  const response = await request;
+  if (!response.ok) {
+    throw new Error(`Geocode API returned ${response.status}`);
+  }
+
   const data = await response.json();
-  if (!Array.isArray(data) || data.length === 0) return null;
+  return Array.isArray(data) ? data : [];
+}
+
+function scoreGeocodeCandidate(candidate, baseQuery) {
+  const normalizedBase = normalizeSearchQuery(baseQuery).toLowerCase();
+  const displayName = String(candidate.display_name || '').toLowerCase();
+  const primaryLabel = displayName.split(',')[0].trim();
+  const tokens = normalizedBase.split(/\s+/).filter(token => token.length > 2);
+
+  let score = 0;
+
+  if (primaryLabel === normalizedBase) score += 120;
+  else if (primaryLabel.startsWith(normalizedBase)) score += 90;
+  else if (displayName.includes(normalizedBase)) score += 60;
+
+  let tokenMatches = 0;
+  for (const token of tokens) {
+    if (displayName.includes(token)) tokenMatches += 1;
+  }
+  score += tokenMatches * 8;
+  if (tokens.length > 0 && tokenMatches === tokens.length) score += 20;
+
+  const importance = Number(candidate.importance);
+  if (Number.isFinite(importance)) {
+    score += importance * 25;
+  }
+
+  const lat = Number(candidate.lat);
+  const lng = Number(candidate.lon);
+  if (
+    typeof getDistance === 'function' &&
+    Number.isFinite(lat) &&
+    Number.isFinite(lng) &&
+    Array.isArray(currentMapCenter) &&
+    currentMapCenter.length >= 2
+  ) {
+    const distanceKm = getDistance(currentMapCenter[0], currentMapCenter[1], lat, lng) / 1000;
+    if (Number.isFinite(distanceKm)) {
+      score += Math.max(0, 25 - Math.min(25, distanceKm));
+    }
+  }
+
+  if (candidate._bounded) score += 8;
+
+  const category = `${candidate.class || ''} ${candidate.type || ''}`.toLowerCase();
+  if (/building|residential|house|apartments/.test(category)) score += 6;
+
+  return score;
+}
+
+async function geocodeQuery(query) {
+  const normalizedQuery = normalizeSearchQuery(query);
+  if (!normalizedQuery) return null;
+
+  const queryVariants = buildGeocodeQueryVariants(normalizedQuery);
+  const countryCode = typeof currentCountryCode === 'string' ? currentCountryCode.toLowerCase() : '';
+  const viewbox = buildSearchViewbox(currentMapCenter);
+  const plans = [];
+
+  for (const variant of queryVariants.slice(0, 3)) {
+    plans.push({
+      q: variant,
+      limit: 7,
+      bounded: Boolean(viewbox),
+      viewbox,
+      countryCode
+    });
+  }
+
+  for (const variant of queryVariants) {
+    plans.push({
+      q: variant,
+      limit: 6,
+      bounded: false,
+      viewbox: '',
+      countryCode
+    });
+  }
+
+  const candidates = [];
+  const seen = new Set();
+
+  for (const plan of plans.slice(0, 7)) {
+    try {
+      const results = await fetchNominatimCandidates(plan.q, plan);
+      for (const item of results) {
+        const key = String(item.place_id || `${item.lat},${item.lon},${item.display_name}`);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push({ ...item, _bounded: plan.bounded });
+      }
+
+      if (candidates.length >= 10) break;
+    } catch (err) {
+      console.warn('Geocode lookup attempt failed:', err);
+    }
+  }
+
+  if (candidates.length === 0) return null;
+
+  const ranked = candidates
+    .map(candidate => ({ candidate, score: scoreGeocodeCandidate(candidate, normalizedQuery) }))
+    .sort((a, b) => b.score - a.score);
+
+  const best = ranked[0] && ranked[0].candidate;
+  if (!best) return null;
+
+  const lat = Number(best.lat);
+  const lng = Number(best.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
 
   return {
-    lat: parseFloat(data[0].lat),
-    lng: parseFloat(data[0].lon),
-    label: data[0].display_name.split(',')[0],
-    fullLabel: data[0].display_name
+    lat,
+    lng,
+    label: String(best.display_name || normalizedQuery).split(',')[0],
+    fullLabel: String(best.display_name || normalizedQuery)
   };
 }
 
@@ -901,7 +1110,7 @@ async function searchLocation() {
         onMapClick({ latlng: { lat: result.lat, lng: result.lng } });
       }, 1600);
     } else {
-      showNotification('❌ Location not found. Try a different search term.', 'error', 3000);
+      showNotification('❌ Location not found. Add city/area, e.g. "Prestige Casabella, Bangalore".', 'error', 3500);
     }
   } catch (err) {
     showNotification('❌ Search failed. Please check your internet connection.', 'error', 3000);
@@ -1120,7 +1329,7 @@ async function startDirectionsFromInput() {
   try {
     const result = await geocodeQuery(query);
     if (!result) {
-      showNotification('❌ Destination not found.', 'error', 2500);
+      showNotification('❌ Destination not found. Try adding area/city in the search text.', 'error', 3200);
       showStatus('');
       return;
     }

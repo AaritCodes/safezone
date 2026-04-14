@@ -458,16 +458,13 @@ const heatmapCache = new Map();
 const CACHE_DURATION = 300000; // 5 minutes
 
 // ── Request Throttling ────────────────────────────────────────
-const REQUEST_DEFAULT_DELAY_MS = 80;
+const REQUEST_DEFAULT_DELAY_MS = 50;
 const REQUEST_DELAY_BY_HOST_MS = {
-  'nominatim.openstreetmap.org': 1000,
-  'overpass-api.de': 650,
-  'overpass.kumi.systems': 650,
-  'lz4.overpass-api.de': 650
+  'nominatim.openstreetmap.org': 200
 };
 const requestHostTimestamps = new Map();
 const RISK_MODEL_STORAGE_KEY = 'safezoneRiskModel';
-const FETCH_TIMEOUT_MS = 7000;
+const FETCH_TIMEOUT_MS = 5000;
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
@@ -761,16 +758,13 @@ async function fetchNearbyAmenities(lat, lng, radius = 3000) {
   }
 
   const query = `
-    [out:json][timeout:10];
+    [out:json][timeout:5];
     (
       node["amenity"="police"](around:${radius},${lat},${lng});
       node["amenity"="hospital"](around:${radius},${lat},${lng});
       node["amenity"="fire_station"](around:${radius},${lat},${lng});
-      way["amenity"="police"](around:${radius},${lat},${lng});
-      way["amenity"="hospital"](around:${radius},${lat},${lng});
-      way["amenity"="fire_station"](around:${radius},${lat},${lng});
     );
-    out center body;
+    out body;
   `;
 
   try {
@@ -884,7 +878,7 @@ function generateFallbackServices(lat, lng) {
 async function fetchNearbyCameras(lat, lng, radius = 2000) {
 
   const query = `
-    [out:json][timeout:10];
+    [out:json][timeout:5];
     (
       node["man_made"="surveillance"](around:${radius},${lat},${lng});
       node["amenity"="cctv"](around:${radius},${lat},${lng});
@@ -1287,19 +1281,17 @@ async function fetchRecentCrimeSignals(lat, lng) {
 
 async function fetchAccidentRiskSignals(lat, lng, radius = 2000) {
   const query = `
-    [out:json][timeout:10];
+    [out:json][timeout:5];
     (
       node["hazard"~"accident|dangerous_curve|slippery|falling_rocks"](around:${radius},${lat},${lng});
-      way["hazard"~"accident|dangerous_curve|slippery|falling_rocks"](around:${radius},${lat},${lng});
       node["accident"](around:${radius},${lat},${lng});
-      way["accident"](around:${radius},${lat},${lng});
-      node["highway"="traffic_signals"](around:${Math.round(radius * 0.8)},${lat},${lng});
+      node["highway"="traffic_signals"](around:${Math.round(radius * 0.6)},${lat},${lng});
     );
-    out center body;
+    out body;
   `;
 
   try {
-    const { data } = await fetchOverpassJson(query, 10000);
+    const { data } = await fetchOverpassJson(query, 5000);
     const hotspots = [];
     let hazardCount = 0;
     let signalCount = 0;

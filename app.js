@@ -168,47 +168,71 @@ function initMap() {
   }
 }
 
-// ── Load Area Data from APIs ──────────────────────────────────
+// ── Load Area Data from APIs (Progressive) ───────────────────
 async function loadAreaData(lat, lng) {
   if (isFetching) return;
   isFetching = true;
   hasApiErrors = false;
 
   showStatus('Scanning area...');
+  currentMapCenter = [lat, lng];
 
-  try {
-    const [services, cameras, properties, areaInfo, riskData] = await Promise.all([
-      fetchNearbyAmenities(lat, lng, 3000),
-      fetchNearbyCameras(lat, lng, 2000),
-      fetchNearbyProperties(lat, lng, 2000),
-      reverseGeocode(lat, lng),
-      fetchPublicSafetyRisk(lat, lng)
-    ]);
+  // Use defaults so partial results can render immediately
+  let services = { police: [], hospital: [], fire: [] };
+  let cameras = [];
+  let properties = [];
+  let areaInfo = { name: 'Loading...', fullAddress: '', area: '', type: 'unknown', category: 'unknown', countryCode: 'IN' };
+  let riskData = null;
+  let sidebarRendered = false;
 
-    if (services.error || cameras.error || areaInfo.error || (riskData && riskData.criticalError)) {
-      hasApiErrors = true;
-      showNotification('⚠️ Some feeds are unavailable. Showing best available estimates.', 'warning', 5000);
-    }
-
+  function tryRenderSidebar() {
     lastFetchedServices = services;
-    lastFetchedCameras = Array.isArray(cameras) ? cameras : (cameras.cameras || []);
+    lastFetchedCameras = cameras;
     lastFetchedProperties = properties;
     lastAreaInfo = areaInfo;
     lastRiskData = riskData;
-    currentMapCenter = [lat, lng];
-
     updateEmergencyMarkers(services);
-    updateCameraMarkers(lastFetchedCameras);
-    updatePropertyMarkers(lastFetchedProperties);
+    updateCameraMarkers(cameras);
+    updatePropertyMarkers(properties);
     updateRiskMarkers(riskData);
     updateHeatmap();
-
-    showStatus('');
-  } catch (err) {
-    console.error('Failed to load area data:', err);
-    showNotification('❌ Failed to load area data. Please try again.', 'error', 5000);
-    showStatus('');
+    sidebarRendered = true;
   }
+
+  // Fire all API calls concurrently, handle each as it arrives
+  const servicesP = fetchNearbyAmenities(lat, lng, 3000).then(r => { services = r; updateEmergencyMarkers(services); }).catch(e => { console.warn('Amenities:', e); hasApiErrors = true; });
+  const camerasP = fetchNearbyCameras(lat, lng, 2000).then(r => { cameras = Array.isArray(r) ? r : (r.cameras || []); updateCameraMarkers(cameras); }).catch(e => { console.warn('Cameras:', e); hasApiErrors = true; });
+  const propsP = fetchNearbyProperties(lat, lng, 2000).then(r => { properties = r; updatePropertyMarkers(properties); }).catch(e => { console.warn('Properties:', e); });
+  const geoP = reverseGeocode(lat, lng).then(r => { areaInfo = r; }).catch(e => { console.warn('Geocode:', e); hasApiErrors = true; });
+  const riskP = fetchPublicSafetyRisk(lat, lng).then(r => { riskData = r; if (r && r.criticalError) hasApiErrors = true; updateRiskMarkers(riskData); }).catch(e => { console.warn('Risk:', e); hasApiErrors = true; });
+
+  // Hard deadline: after 5 seconds, render whatever we have
+  const deadline = new Promise(resolve => setTimeout(resolve, 5000));
+
+  // Wait for EITHER all APIs to finish OR the deadline
+  await Promise.race([
+    Promise.allSettled([servicesP, camerasP, propsP, geoP, riskP]),
+    deadline
+  ]);
+
+  // Render the sidebar with whatever data we have so far
+  tryRenderSidebar();
+  updateHeatmap();
+  showStatus('');
+
+  if (hasApiErrors) {
+    showNotification('⚠️ Some feeds are unavailable. Showing best available estimates.', 'warning', 5000);
+  }
+
+  // Let remaining calls finish in background and update silently
+  Promise.allSettled([servicesP, camerasP, propsP, geoP, riskP]).then(() => {
+    lastFetchedServices = services;
+    lastFetchedCameras = cameras;
+    lastFetchedProperties = properties;
+    lastAreaInfo = areaInfo;
+    lastRiskData = riskData;
+    updateHeatmap();
+  });
 
   isFetching = false;
 }

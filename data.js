@@ -53,7 +53,17 @@ async function ensureGoogleMapsLoaded() {
   const key = getGoogleApiKey();
   googleMapsLoadingPromise = new Promise((resolve) => {
     const callbackName = 'initGoogleMapsSDK' + Date.now();
+    let isTimeout = false;
+
+    const timeoutId = setTimeout(() => {
+      isTimeout = true;
+      console.warn('Google Maps SDK load timed out.');
+      resolve(false);
+    }, 8000);
+
     window[callbackName] = () => {
+      if (isTimeout) return;
+      clearTimeout(timeoutId);
       googleMapsLoaded = true;
       resolve(true);
       delete window[callbackName];
@@ -63,6 +73,8 @@ async function ensureGoogleMapsLoaded() {
     script.async = true;
     script.defer = true;
     script.onerror = () => {
+      if (isTimeout) return;
+      clearTimeout(timeoutId);
       console.warn('Failed to load Google Maps SDK script.');
       resolve(false);
     };
@@ -942,9 +954,10 @@ async function reverseGeocode(lat, lng) {
   }
 
   try {
-    const response = await throttledFetch(
+    const response = await fetchWithTimeout(
       `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=16&addressdetails=1`,
-      { headers: { 'Accept-Language': 'en' } }
+      { headers: { 'Accept-Language': 'en' } },
+      8000
     );
     
     if (!response.ok) {
@@ -1237,7 +1250,7 @@ async function fetchRecentCrimeSignals(lat, lng) {
   }
 
   try {
-    const response = await throttledFetch(`https://data.police.uk/api/crimes-street/all-crime?lat=${lat}&lng=${lng}`);
+    const response = await fetchWithTimeout(`https://data.police.uk/api/crimes-street/all-crime?lat=${lat}&lng=${lng}`, {}, 8000);
     if (!response.ok) {
       throw new Error(`Crime API returned ${response.status}`);
     }

@@ -117,7 +117,9 @@ async function fetchGoogleJson(url, options = {}, timeoutMs = 9000, context = 'r
   let response;
 
   try {
-    response = await fetchWithTimeout(url, options, timeoutMs);
+    // Proxy the Google API request to bypass strict browser CORS blocks
+    const fetchUrl = url.includes('googleapis.com') ? `https://corsproxy.io/?${encodeURIComponent(url)}` : url;
+    response = await fetchWithTimeout(fetchUrl, options, timeoutMs);
   } catch (err) {
     if (err && err.name === 'AbortError') {
       throw createGoogleApiError(context, { code: 'GOOGLE_TIMEOUT', cause: err });

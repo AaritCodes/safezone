@@ -140,11 +140,32 @@ function initMap() {
   slider.setAttribute('aria-valuenow', currentHour);
   updateTimeDisplay();
 
-  loadAreaData(MAP_CENTER[0], MAP_CENTER[1]);
+  const hideLoading = () => {
+    setTimeout(() => {
+      document.getElementById('loadingOverlay').classList.add('hidden');
+    }, 500);
+  };
 
-  setTimeout(() => {
-    document.getElementById('loadingOverlay').classList.add('hidden');
-  }, 1500);
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const userLat = position.coords.latitude;
+        const userLng = position.coords.longitude;
+        map.setView([userLat, userLng], MAP_ZOOM);
+        loadAreaData(userLat, userLng);
+        hideLoading();
+      },
+      (error) => {
+        console.warn('Geolocation failed or denied. Falling back to default.', error);
+        loadAreaData(MAP_CENTER[0], MAP_CENTER[1]);
+        hideLoading();
+      },
+      { timeout: 10000, maximumAge: 0 }
+    );
+  } else {
+    loadAreaData(MAP_CENTER[0], MAP_CENTER[1]);
+    hideLoading();
+  }
 }
 
 // ── Load Area Data from APIs ──────────────────────────────────

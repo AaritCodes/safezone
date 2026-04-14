@@ -5,7 +5,7 @@
 // Default center: New Delhi, India
 const MAP_CENTER = [28.6139, 77.2090];
 const MAP_ZOOM = 13;
-const GOOGLE_API_KEY = '';
+const GOOGLE_API_KEY = 'AIzaSyCYFwU8dtaM2mj0l-_Q1EGgpV2Ab_LjRz4';
 const GOOGLE_API_KEY_META_NAME = 'safezone-google-api-key';
 
 function readGoogleApiKeyFromMetaTag() {
@@ -873,19 +873,8 @@ function generateFallbackServices(lat, lng) {
   return services;
 }
 
-// ── Nearby Surveillance Signals (Google Places preferred, Overpass fallback) ─
+// ── Nearby Surveillance Signals (Strictly Overpass API) ──────────────────────
 async function fetchNearbyCameras(lat, lng, radius = 2000) {
-  if (hasGoogleApiKey()) {
-    try {
-      const googleCameras = await fetchNearbyCamerasWithGoogle(lat, lng, radius);
-      if (googleCameras.length > 0) {
-        return googleCameras;
-      }
-    } catch (err) {
-      console.warn('Google Places camera lookup failed, falling back to Overpass:', err);
-      notifyGoogleFallback(err, 'OpenStreetMap camera feed');
-    }
-  }
 
   const query = `
     [out:json][timeout:10];

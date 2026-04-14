@@ -42,6 +42,35 @@ function hasGoogleApiKey() {
   return Boolean(key && key.length > 20);
 }
 
+let googleMapsLoaded = false;
+let googleMapsLoadingPromise = null;
+
+async function ensureGoogleMapsLoaded() {
+  if (typeof google !== 'undefined' && google && google.maps) return true;
+  if (!hasGoogleApiKey()) return false;
+  if (googleMapsLoadingPromise) return googleMapsLoadingPromise;
+
+  const key = getGoogleApiKey();
+  googleMapsLoadingPromise = new Promise((resolve) => {
+    const callbackName = 'initGoogleMapsSDK' + Date.now();
+    window[callbackName] = () => {
+      googleMapsLoaded = true;
+      resolve(true);
+      delete window[callbackName];
+    };
+    const script = document.createElement('script');
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${key}&libraries=places&callback=${callbackName}`;
+    script.async = true;
+    script.defer = true;
+    script.onerror = () => {
+      console.warn('Failed to load Google Maps SDK script.');
+      resolve(false);
+    };
+    document.head.appendChild(script);
+  });
+  return googleMapsLoadingPromise;
+}
+
 function getGoogleErrorCode(details = {}) {
   if (details.code) return details.code;
 
@@ -117,9 +146,7 @@ async function fetchGoogleJson(url, options = {}, timeoutMs = 9000, context = 'r
   let response;
 
   try {
-    // Proxy the Google API request to bypass strict browser CORS blocks
-    const fetchUrl = url.includes('googleapis.com') ? `https://corsproxy.io/?${encodeURIComponent(url)}` : url;
-    response = await fetchWithTimeout(fetchUrl, options, timeoutMs);
+    response = await fetchWithTimeout(url, options, timeoutMs);
   } catch (err) {
     if (err && err.name === 'AbortError') {
       throw createGoogleApiError(context, { code: 'GOOGLE_TIMEOUT', cause: err });
@@ -224,100 +251,85 @@ function decodeGooglePolyline(encoded) {
 }
 
 async function geocodeQueryWithGoogle(query) {
-  if (!hasGoogleApiKey()) return null;
+  const isLoaded = await ensureGoogleMapsLoaded();
+  if (!isLoaded) return null;
 
-  const key = getGoogleApiKey();
-  const params = new URLSearchParams({
-    address: query,
-    key
+  return new Promise((resolve) => {
+    const geocoder = new google.maps.Geocoder();
+    const region = getCurrentRegionHint();
+    const request = { address: query };
+    if (region && /^[a-z]{2}$/i.test(region)) {
+      request.region = region;
+    }
+
+    geocoder.geocode(request, (results, status) => {
+      if (status !== 'OK' || !results || results.length === 0) {
+        return resolve(null);
+      }
+
+      const best = results[0];
+      const location = best.geometry && best.geometry.location ? best.geometry.location : null;
+      if (!location) return resolve(null);
+
+      const label = String(best.formatted_address || query).split(',')[0].trim();
+      const addressComponents = Array.isArray(best.address_components) ? best.address_components : [];
+      const countryComponent = addressComponents.find(component => Array.isArray(component.types) && component.types.includes('country'));
+      if (countryComponent && countryComponent.short_name) {
+        currentCountryCode = String(countryComponent.short_name).toUpperCase();
+      }
+
+      resolve({
+        lat: location.lat(),
+        lng: location.lng(),
+        label,
+        fullLabel: String(best.formatted_address || query),
+        source: 'google-geocode-sdk'
+      });
+    });
   });
-
-  const region = getCurrentRegionHint();
-  if (region && /^[a-z]{2}$/i.test(region)) {
-    params.set('region', region);
-  }
-
-  const { data, noResults } = await fetchGoogleJson(
-    `https://maps.googleapis.com/maps/api/geocode/json?${params.toString()}`,
-    {},
-    9000,
-    'geocode'
-  );
-
-  if (noResults || !Array.isArray(data.results) || data.results.length === 0) {
-    return null;
-  }
-
-  const best = data.results[0];
-  const location = best.geometry && best.geometry.location ? best.geometry.location : null;
-  if (!location || !Number.isFinite(Number(location.lat)) || !Number.isFinite(Number(location.lng))) {
-    return null;
-  }
-
-  const label = String(best.formatted_address || query).split(',')[0].trim();
-  const addressComponents = Array.isArray(best.address_components) ? best.address_components : [];
-  const countryComponent = addressComponents.find(component => Array.isArray(component.types) && component.types.includes('country'));
-  if (countryComponent && countryComponent.short_name) {
-    currentCountryCode = String(countryComponent.short_name).toUpperCase();
-  }
-
-  return {
-    lat: Number(location.lat),
-    lng: Number(location.lng),
-    label,
-    fullLabel: String(best.formatted_address || query),
-    source: 'google-geocode'
-  };
 }
 
 async function reverseGeocodeWithGoogle(lat, lng) {
-  if (!hasGoogleApiKey()) return null;
+  const isLoaded = await ensureGoogleMapsLoaded();
+  if (!isLoaded) return null;
 
-  const key = getGoogleApiKey();
-  const params = new URLSearchParams({
-    latlng: `${lat},${lng}`,
-    key
+  return new Promise((resolve) => {
+    const geocoder = new google.maps.Geocoder();
+    geocoder.geocode({ location: { lat, lng } }, (results, status) => {
+      if (status !== 'OK' || !results || results.length === 0) {
+        return resolve(null);
+      }
+
+      const best = results[0];
+      const addressComponents = Array.isArray(best.address_components) ? best.address_components : [];
+      const getComponent = (types) => {
+        const match = addressComponents.find(component => Array.isArray(component.types) && types.some(type => component.types.includes(type)));
+        return match ? match.long_name : '';
+      };
+
+      const countryShort = (() => {
+        const match = addressComponents.find(component => Array.isArray(component.types) && component.types.includes('country'));
+        return match && match.short_name ? String(match.short_name).toUpperCase() : '';
+      })();
+
+      if (countryShort) {
+        currentCountryCode = countryShort;
+      }
+
+      const locality = getComponent(['neighborhood', 'sublocality', 'locality', 'administrative_area_level_2']);
+      const area = getComponent(['locality', 'administrative_area_level_2', 'administrative_area_level_1']);
+
+      resolve({
+        name: locality || String(best.formatted_address || 'Selected location').split(',')[0],
+        fullAddress: String(best.formatted_address || `${lat.toFixed(5)}, ${lng.toFixed(5)}`),
+        area: area || locality || '',
+        type: 'google-place',
+        category: 'geocode',
+        countryCode: currentCountryCode,
+        source: 'google-geocode-sdk'
+      });
+    });
   });
-
-  const { data, noResults } = await fetchGoogleJson(
-    `https://maps.googleapis.com/maps/api/geocode/json?${params.toString()}`,
-    {},
-    9000,
-    'reverse-geocode'
-  );
-
-  if (noResults || !Array.isArray(data.results) || data.results.length === 0) {
-    return null;
-  }
-
-  const best = data.results[0];
-  const addressComponents = Array.isArray(best.address_components) ? best.address_components : [];
-  const getComponent = (types) => {
-    const match = addressComponents.find(component => Array.isArray(component.types) && types.some(type => component.types.includes(type)));
-    return match ? match.long_name : '';
-  };
-
-  const countryShort = (() => {
-    const match = addressComponents.find(component => Array.isArray(component.types) && component.types.includes('country'));
-    return match && match.short_name ? String(match.short_name).toUpperCase() : '';
-  })();
-
-  if (countryShort) {
-    currentCountryCode = countryShort;
-  }
-
-  const locality = getComponent(['neighborhood', 'sublocality', 'locality', 'administrative_area_level_2']);
-  const area = getComponent(['locality', 'administrative_area_level_2', 'administrative_area_level_1']);
-
-  return {
-    name: locality || String(best.formatted_address || 'Selected location').split(',')[0],
-    fullAddress: String(best.formatted_address || `${lat.toFixed(5)}, ${lng.toFixed(5)}`),
-    area: area || locality || '',
-    type: 'google-place',
-    category: 'geocode',
-    countryCode: currentCountryCode,
-    source: 'google-geocode'
-  };
 }
 
 async function fetchApproximateLocationFromGoogle() {
@@ -353,62 +365,54 @@ async function fetchApproximateLocationFromGoogle() {
 }
 
 async function fetchRouteDirectionsWithGoogle(fromLat, fromLng, toLat, toLng, profile = 'driving') {
-  if (!hasGoogleApiKey()) return null;
+  const isLoaded = await ensureGoogleMapsLoaded();
+  if (!isLoaded) return null;
 
-  const key = getGoogleApiKey();
-  const mode = profile === 'walking' ? 'walking' : 'driving';
-  const params = new URLSearchParams({
-    origin: `${fromLat},${fromLng}`,
-    destination: `${toLat},${toLng}`,
-    mode,
-    alternatives: 'false',
-    key
+  return new Promise((resolve) => {
+    const directionsService = new google.maps.DirectionsService();
+    const mode = profile === 'walking' ? google.maps.TravelMode.WALKING : google.maps.TravelMode.DRIVING;
+
+    directionsService.route({
+      origin: new google.maps.LatLng(fromLat, fromLng),
+      destination: new google.maps.LatLng(toLat, toLng),
+      travelMode: mode,
+      provideRouteAlternatives: false
+    }, (response, status) => {
+      if (status !== 'OK' || !response || !response.routes || response.routes.length === 0) {
+        return resolve(null);
+      }
+
+      const route = response.routes[0];
+      const leg = route.legs && route.legs.length > 0 ? route.legs[0] : null;
+      if (!leg) return resolve(null);
+
+      const path = route.overview_path.map(p => [p.lat(), p.lng()]);
+
+      const steps = (Array.isArray(leg.steps) ? leg.steps : []).map((step, i) => {
+        const instruction = stripHtmlTags(step.instructions || 'Continue');
+        const distance = step.distance && step.distance.value ? step.distance.value : 0;
+        const duration = step.duration && step.duration.value ? step.duration.value : 0;
+        
+        return {
+          index: i,
+          instruction,
+          voiceInstruction: `${instruction}. Continue for ${formatDistance(distance)}.`,
+          distance: Math.round(distance),
+          duration: Math.round(duration),
+          lat: step.end_location.lat(),
+          lng: step.end_location.lng()
+        };
+      });
+
+      resolve({
+        source: 'google-directions-sdk',
+        distance: Math.round(leg.distance && leg.distance.value ? leg.distance.value : 0),
+        duration: Math.round(leg.duration && leg.duration.value ? leg.duration.value : 0),
+        path: path.length > 1 ? path : [[fromLat, fromLng], [toLat, toLng]],
+        steps
+      });
+    });
   });
-
-  const { data, noResults } = await fetchGoogleJson(
-    `https://maps.googleapis.com/maps/api/directions/json?${params.toString()}`,
-    {},
-    9000,
-    'directions'
-  );
-
-  if (noResults || !Array.isArray(data.routes) || data.routes.length === 0) {
-    return null;
-  }
-
-  const route = data.routes[0];
-  const leg = Array.isArray(route.legs) && route.legs.length > 0 ? route.legs[0] : null;
-  if (!leg) {
-    return null;
-  }
-
-  const encodedPolyline = route.overview_polyline && route.overview_polyline.points ? route.overview_polyline.points : '';
-  const path = decodeGooglePolyline(encodedPolyline);
-
-  const steps = (Array.isArray(leg.steps) ? leg.steps : []).map((step, i) => {
-    const endLocation = step.end_location || {};
-    const instruction = stripHtmlTags(step.html_instructions || 'Continue');
-    const distance = Math.round(step.distance && step.distance.value ? step.distance.value : 0);
-    const duration = Math.round(step.duration && step.duration.value ? step.duration.value : 0);
-
-    return {
-      index: i,
-      instruction,
-      voiceInstruction: `${instruction}. Continue for ${formatDistance(distance)}.`,
-      distance,
-      duration,
-      lat: Number.isFinite(Number(endLocation.lat)) ? Number(endLocation.lat) : toLat,
-      lng: Number.isFinite(Number(endLocation.lng)) ? Number(endLocation.lng) : toLng
-    };
-  });
-
-  return {
-    source: 'google-directions',
-    distance: Math.round(leg.distance && leg.distance.value ? leg.distance.value : 0),
-    duration: Math.round(leg.duration && leg.duration.value ? leg.duration.value : 0),
-    path: path.length > 1 ? path : [[fromLat, fromLng], [toLat, toLng]],
-    steps
-  };
 }
 
 // ── Real Emergency Numbers (Expanded) ─────────────────────────
@@ -578,35 +582,35 @@ function normalizeGooglePlacesRadius(radius, fallbackRadius = 3000) {
 }
 
 async function fetchGoogleNearbyPlaces(lat, lng, radius, options = {}) {
-  if (!hasGoogleApiKey()) return [];
+  const isLoaded = await ensureGoogleMapsLoaded();
+  if (!isLoaded) return [];
 
-  const key = getGoogleApiKey();
-  const params = new URLSearchParams({
-    location: `${lat},${lng}`,
-    radius: String(normalizeGooglePlacesRadius(radius, 3000)),
-    key
+  return new Promise((resolve) => {
+    const dummyDiv = document.createElement('div');
+    const service = new google.maps.places.PlacesService(dummyDiv);
+    
+    const request = {
+      location: new google.maps.LatLng(lat, lng),
+      radius: normalizeGooglePlacesRadius(radius, 3000)
+    };
+
+    if (options.type) {
+      request.type = [String(options.type)];
+    }
+
+    if (options.keyword) {
+      request.keyword = String(options.keyword);
+    }
+
+    service.nearbySearch(request, (results, status) => {
+      if (status === google.maps.places.PlacesServiceStatus.OK && results) {
+        resolve(results);
+      } else {
+        resolve([]);
+      }
+      dummyDiv.remove();
+    });
   });
-
-  if (options.type) {
-    params.set('type', String(options.type));
-  }
-
-  if (options.keyword) {
-    params.set('keyword', String(options.keyword));
-  }
-
-  const { data, noResults } = await fetchGoogleJson(
-    `${GOOGLE_PLACES_ENDPOINT}?${params.toString()}`,
-    {},
-    9000,
-    options.context || 'places-nearby'
-  );
-
-  if (noResults || !Array.isArray(data.results)) {
-    return [];
-  }
-
-  return data.results;
 }
 
 function mapGoogleAmenityResults(results, amenityType, userLat, userLng) {
@@ -614,8 +618,12 @@ function mapGoogleAmenityResults(results, amenityType, userLat, userLng) {
 
   (results || []).forEach((place, i) => {
     const location = place && place.geometry ? place.geometry.location : null;
-    const lat = location ? Number(location.lat) : NaN;
-    const lng = location ? Number(location.lng) : NaN;
+    let lat = NaN;
+    let lng = NaN;
+    if (location) {
+      lat = typeof location.lat === 'function' ? location.lat() : Number(location.lat);
+      lng = typeof location.lng === 'function' ? location.lng() : Number(location.lng);
+    }
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
 
     const serviceType = amenityType === 'fire_station' ? 'fire' : amenityType;
@@ -642,10 +650,12 @@ function dedupeGooglePlacesResults(results) {
 
   (results || []).forEach((place) => {
     const location = place && place.geometry ? place.geometry.location : null;
+    const lat = location ? (typeof location.lat === 'function' ? location.lat() : location.lat) : '';
+    const lng = location ? (typeof location.lng === 'function' ? location.lng() : location.lng) : '';
     const key = String(
       place && place.place_id
         ? place.place_id
-        : `${place && place.name ? place.name : ''}:${location && location.lat ? location.lat : ''}:${location && location.lng ? location.lng : ''}`
+        : `${place && place.name ? place.name : ''}:${lat}:${lng}`
     );
 
     if (!key || seen.has(key)) return;

@@ -484,6 +484,7 @@ const OVERPASS_ENDPOINTS = [
 ];
 const GOOGLE_PLACES_ENDPOINT = 'https://maps.googleapis.com/maps/api/place/nearbysearch/json';
 const GOOGLE_PLACES_MAX_RADIUS = 50000;
+const GOOGLE_PLACES_CALLBACK_TIMEOUT_MS = 6500;
 
 const THEFT_CATEGORIES = new Set([
   'burglary',
@@ -606,14 +607,32 @@ async function fetchGoogleNearbyPlaces(lat, lng, radius, options = {}) {
       request.keyword = String(options.keyword);
     }
 
-    service.nearbySearch(request, (results, status) => {
-      if (status === google.maps.places.PlacesServiceStatus.OK && results) {
-        resolve(results);
-      } else {
-        resolve([]);
-      }
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      resolve(Array.isArray(value) ? value : []);
       dummyDiv.remove();
-    });
+    };
+
+    const timeoutId = setTimeout(() => {
+      console.warn(`Google Places lookup timed out after ${GOOGLE_PLACES_CALLBACK_TIMEOUT_MS}ms`);
+      finish([]);
+    }, GOOGLE_PLACES_CALLBACK_TIMEOUT_MS);
+
+    try {
+      service.nearbySearch(request, (results, status) => {
+        if (status === google.maps.places.PlacesServiceStatus.OK && Array.isArray(results)) {
+          finish(results);
+        } else {
+          finish([]);
+        }
+      });
+    } catch (err) {
+      console.warn('Google Places nearby search threw an error:', err);
+      finish([]);
+    }
   });
 }
 
@@ -675,8 +694,12 @@ function mapGoogleCameraResults(results, userLat, userLng) {
 
   (results || []).forEach((place, i) => {
     const location = place && place.geometry ? place.geometry.location : null;
-    const lat = location ? Number(location.lat) : NaN;
-    const lng = location ? Number(location.lng) : NaN;
+    const lat = location
+      ? (typeof location.lat === 'function' ? Number(location.lat()) : Number(location.lat))
+      : NaN;
+    const lng = location
+      ? (typeof location.lng === 'function' ? Number(location.lng()) : Number(location.lng))
+      : NaN;
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
 
     const businessStatus = String(place.business_status || '').toUpperCase();

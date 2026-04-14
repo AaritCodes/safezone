@@ -14,6 +14,9 @@ let lastAreaInfo = null;
 let lastRiskData = null;
 let isFetching = false;
 let hasApiErrors = false;
+const SCAN_SOFT_DEADLINE_MS = 6000;
+const SCAN_CALL_TIMEOUT_MS = 9000;
+let activeScanRequestId = 0;
 
 let favoriteLocations = JSON.parse(localStorage.getItem('safezoneFavorites') || '[]');
 let emergencyContacts = JSON.parse(localStorage.getItem('safezoneEmergencyContacts') || '[]');
@@ -497,9 +500,36 @@ function updateRiskMarkers(riskData) {
   if (!layerState.risk) map.removeLayer(riskLayerGroup);
 }
 
+function withTimeoutFallback(promise, timeoutMs, fallbackValue, label = 'request') {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      console.warn(`${label} timed out after ${timeoutMs}ms`);
+      resolve(typeof fallbackValue === 'function' ? fallbackValue() : fallbackValue);
+    }, timeoutMs);
+
+    promise
+      .then((value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        resolve(value);
+      })
+      .catch((error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        reject(error);
+      });
+  });
+}
+
 // ── Map Click Handler ─────────────────────────────────────────
 async function onMapClick(e) {
   const { lat, lng } = e.latlng;
+  const requestId = ++activeScanRequestId;
 
   if (selectedMarker) map.removeLayer(selectedMarker);
 
@@ -515,33 +545,201 @@ async function onMapClick(e) {
   openSidebar();
   showSidebarLoading();
 
+  let services = { police: [], hospital: [], fire: [] };
+  let cameras = [];
+  let properties = [];
+  let areaInfo = {
+    name: 'Selected location',
+    fullAddress: `${lat.toFixed(5)}, ${lng.toFixed(5)}`,
+    area: '',
+    type: 'unknown',
+    category: 'unknown',
+    countryCode: currentCountryCode || 'IN'
+  };
+  let riskData = {
+    theftCount: 0,
+    violentCount: 0,
+    totalCrime: 0,
+    accidentHotspots: 0,
+    conflictPoints: 0,
+    penalty: 0,
+    factors: ['Public risk feeds unavailable, using base model only'],
+    confidence: 'low',
+    month: 'latest',
+    hotspots: [],
+    sources: {
+      crime: 'unavailable',
+      accidents: 'unavailable'
+    },
+    partialError: true,
+    criticalError: true,
+    error: 'API_FAILED'
+  };
+  let scanHadErrors = false;
+
   try {
-    const [services, cameras, properties, areaInfo, riskData] = await Promise.all([
+    const servicesP = withTimeoutFallback(
       fetchNearbyAmenities(lat, lng, 3000),
+      SCAN_CALL_TIMEOUT_MS,
+      () => ({ police: [], hospital: [], fire: [], error: 'API_TIMEOUT' }),
+      'Amenities fetch'
+    ).then((result) => {
+      services = result || services;
+      if (services && services.error) scanHadErrors = true;
+      if (requestId !== activeScanRequestId) return;
+      updateEmergencyMarkers(services);
+    }).catch((err) => {
+      console.warn('Amenities fetch failed during scan:', err);
+      scanHadErrors = true;
+    });
+
+    const camerasP = withTimeoutFallback(
       fetchNearbyCameras(lat, lng, 2000),
+      SCAN_CALL_TIMEOUT_MS,
+      () => ({ cameras: [], error: 'API_TIMEOUT' }),
+      'Camera fetch'
+    ).then((result) => {
+      const cameraArray = Array.isArray(result) ? result : (result && Array.isArray(result.cameras) ? result.cameras : []);
+      cameras = cameraArray;
+      if (result && result.error) scanHadErrors = true;
+      if (requestId !== activeScanRequestId) return;
+      updateCameraMarkers(cameras);
+    }).catch((err) => {
+      console.warn('Camera fetch failed during scan:', err);
+      scanHadErrors = true;
+    });
+
+    const propertiesP = withTimeoutFallback(
       fetchNearbyProperties(lat, lng, 2000),
+      SCAN_CALL_TIMEOUT_MS,
+      () => [],
+      'Property fetch'
+    ).then((result) => {
+      properties = Array.isArray(result) ? result : [];
+      if (requestId !== activeScanRequestId) return;
+      updatePropertyMarkers(properties);
+    }).catch((err) => {
+      console.warn('Property fetch failed during scan:', err);
+      scanHadErrors = true;
+    });
+
+    const geocodeP = withTimeoutFallback(
       reverseGeocode(lat, lng),
-      fetchPublicSafetyRisk(lat, lng)
+      SCAN_CALL_TIMEOUT_MS,
+      () => areaInfo,
+      'Reverse geocode'
+    ).then((result) => {
+      if (result && typeof result === 'object') {
+        areaInfo = {
+          ...areaInfo,
+          ...result
+        };
+      }
+      if (result && result.error) scanHadErrors = true;
+    }).catch((err) => {
+      console.warn('Reverse geocode failed during scan:', err);
+      scanHadErrors = true;
+    });
+
+    const riskP = withTimeoutFallback(
+      fetchPublicSafetyRisk(lat, lng),
+      SCAN_CALL_TIMEOUT_MS,
+      () => ({
+        theftCount: 0,
+        violentCount: 0,
+        totalCrime: 0,
+        accidentHotspots: 0,
+        conflictPoints: 0,
+        penalty: 0,
+        factors: ['Public risk feeds timed out, using base model only'],
+        confidence: 'low',
+        month: 'latest',
+        hotspots: [],
+        sources: {
+          crime: 'unavailable',
+          accidents: 'unavailable'
+        },
+        partialError: true,
+        criticalError: true,
+        error: 'API_TIMEOUT'
+      }),
+      'Public safety risk fetch'
+    ).then((result) => {
+      if (result && typeof result === 'object') {
+        riskData = result;
+      }
+      if (riskData && (riskData.error || riskData.partialError || riskData.criticalError)) {
+        scanHadErrors = true;
+      }
+      if (requestId !== activeScanRequestId) return;
+      updateRiskMarkers(riskData);
+    }).catch((err) => {
+      console.warn('Public safety risk fetch failed during scan:', err);
+      scanHadErrors = true;
+    });
+
+    const allFetches = [servicesP, camerasP, propertiesP, geocodeP, riskP];
+    const completedBeforeDeadline = await Promise.race([
+      Promise.allSettled(allFetches).then(() => true),
+      new Promise(resolve => setTimeout(() => resolve(false), SCAN_SOFT_DEADLINE_MS))
     ]);
 
-    hasApiErrors = Boolean(services.error || cameras.error || areaInfo.error || (riskData && riskData.criticalError));
+    if (!completedBeforeDeadline) {
+      scanHadErrors = true;
+    }
 
+    if (requestId !== activeScanRequestId) return;
+
+    hasApiErrors = scanHadErrors;
     lastFetchedServices = services;
-    lastFetchedCameras = Array.isArray(cameras) ? cameras : (cameras.cameras || []);
+    lastFetchedCameras = cameras;
     lastFetchedProperties = properties;
     lastAreaInfo = areaInfo;
     lastRiskData = riskData;
 
     updateEmergencyMarkers(services);
-    updateCameraMarkers(lastFetchedCameras);
-    updatePropertyMarkers(lastFetchedProperties);
+    updateCameraMarkers(cameras);
+    updatePropertyMarkers(properties);
     updateRiskMarkers(riskData);
-
     refreshSelectedSidebar();
+
+    if (scanHadErrors) {
+      showNotification('⚠️ Some feeds are slow or unavailable. Showing best available estimates.', 'warning', 5000);
+    }
+
+    Promise.allSettled(allFetches).then(() => {
+      if (requestId !== activeScanRequestId) return;
+
+      hasApiErrors = scanHadErrors;
+      lastFetchedServices = services;
+      lastFetchedCameras = cameras;
+      lastFetchedProperties = properties;
+      lastAreaInfo = areaInfo;
+      lastRiskData = riskData;
+      updateEmergencyMarkers(services);
+      updateCameraMarkers(cameras);
+      updatePropertyMarkers(properties);
+      updateRiskMarkers(riskData);
+      refreshSelectedSidebar();
+    });
   } catch (err) {
+    if (requestId !== activeScanRequestId) return;
     console.error('Error fetching location data:', err);
-    showNotification('❌ Failed to analyze location. Please try again.', 'error', 5000);
-    closeSidebar();
+    hasApiErrors = true;
+
+    lastFetchedServices = services;
+    lastFetchedCameras = cameras;
+    lastFetchedProperties = properties;
+    lastAreaInfo = areaInfo;
+    lastRiskData = riskData;
+
+    updateEmergencyMarkers(services);
+    updateCameraMarkers(cameras);
+    updatePropertyMarkers(properties);
+    updateRiskMarkers(riskData);
+    refreshSelectedSidebar();
+
+    showNotification('⚠️ Scan timed out. Showing limited data for this area.', 'warning', 5000);
   }
 }
 

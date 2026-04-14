@@ -467,7 +467,7 @@ const REQUEST_DELAY_BY_HOST_MS = {
 };
 const requestHostTimestamps = new Map();
 const RISK_MODEL_STORAGE_KEY = 'safezoneRiskModel';
-const FETCH_TIMEOUT_MS = 12000;
+const FETCH_TIMEOUT_MS = 7000;
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
@@ -547,32 +547,27 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS)
 }
 
 async function fetchOverpassJson(query, timeoutMs = FETCH_TIMEOUT_MS) {
-  let lastError = null;
+  const promises = OVERPASS_ENDPOINTS.map(async (endpoint) => {
+    const response = await fetchWithTimeout(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'data=' + encodeURIComponent(query)
+    }, timeoutMs);
 
-  for (const endpoint of OVERPASS_ENDPOINTS) {
-    try {
-      const response = await fetchWithTimeout(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'data=' + encodeURIComponent(query)
-      }, timeoutMs);
-
-      if (!response.ok) {
-        throw new Error(`Overpass API returned ${response.status}`);
-      }
-
-      const data = await response.json();
-      return {
-        data,
-        source: endpoint
-      };
-    } catch (err) {
-      lastError = err;
-      console.warn('Overpass endpoint failed:', endpoint, err);
+    if (!response.ok) {
+      throw new Error(`Overpass API returned ${response.status}`);
     }
-  }
 
-  throw lastError || new Error('All Overpass endpoints failed');
+    const data = await response.json();
+    return { data, source: endpoint };
+  });
+
+  try {
+    return await Promise.any(promises);
+  } catch (err) {
+    console.warn('All Overpass endpoints failed:', err);
+    throw new Error('All Overpass endpoints failed');
+  }
 }
 
 function normalizeGooglePlacesRadius(radius, fallbackRadius = 3000) {

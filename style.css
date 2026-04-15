@@ -265,6 +265,61 @@ html, body {
   padding: 6px 10px;
 }
 
+.route-action-card {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--border-glass);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.route-action-card.stable {
+  border-color: rgba(56, 189, 248, 0.28);
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.1), rgba(14, 165, 233, 0.03));
+}
+
+.route-action-card.urgent {
+  border-color: rgba(249, 115, 22, 0.35);
+  background: linear-gradient(135deg, rgba(249, 115, 22, 0.12), rgba(249, 115, 22, 0.03));
+}
+
+.route-action-title {
+  font-size: 11px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  font-weight: 800;
+}
+
+.route-action-text {
+  margin-top: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.45;
+  font-weight: 600;
+}
+
+.route-action-meta {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.search-btn.ai-action-btn {
+  width: 100%;
+  margin-top: 10px;
+  padding: 10px 14px;
+}
+
+.search-btn.ai-action-secondary {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border-glass);
+}
+
+.search-btn.ai-action-secondary:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
 .search-btn {
   background: var(--accent);
   border: none;

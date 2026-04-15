@@ -26,6 +26,14 @@ let activeRoute = null;
 let routeDestination = null;
 let routeStepIndex = 0;
 let navigationWatchId = null;
+let mobilityRefreshTimerId = null;
+let lastMobilityRefreshAt = 0;
+let lastMobilitySuggestionAt = 0;
+let lastMobilitySuggestedRouteId = '';
+
+const MOBILITY_REFRESH_INTERVAL_MS = 9000;
+const MOBILITY_NOTIFICATION_COOLDOWN_MS = 22000;
+const MOBILITY_SWITCH_MIN_GAIN_SECONDS = 75;
 
 let speechRecognition = null;
 let isVoiceListening = false;
@@ -1039,6 +1047,10 @@ async function onTimeChange(value) {
 
   updateHeatmap();
   refreshSelectedSidebar();
+
+  if (activeRoute && routeDestination) {
+    refreshMobilityIntelligence({ notify: false, keepViewport: true });
+  }
 }
 
 function updateTimeDisplay() {
@@ -1536,10 +1548,14 @@ function toggleVoiceSearch() {
 // ── Directions + Voice Navigation ─────────────────────────────
 function openDirectionsPanel() {
   document.getElementById('directionsPanel').classList.add('open');
+  if (activeRoute && routeDestination) {
+    startMobilityRefreshLoop();
+  }
 }
 
 function closeDirectionsPanel() {
   document.getElementById('directionsPanel').classList.remove('open');
+  stopMobilityRefreshLoop();
   stopVoiceNavigation();
 }
 
@@ -1658,6 +1674,168 @@ function getActiveRouteAlternative(route) {
   }
 
   return route.alternatives[0];
+}
+
+function getRouteEtaSeconds(candidate) {
+  if (!candidate) return 0;
+  const congestion = candidate.congestion || {};
+  if (Number.isFinite(congestion.etaSeconds)) {
+    return Math.max(Number(candidate.duration || 0), Number(congestion.etaSeconds || 0));
+  }
+  return Math.max(0, Number(candidate.duration || 0));
+}
+
+function getRouteRefreshAgeLabel() {
+  if (!lastMobilityRefreshAt) return 'Live update pending';
+  const ageSeconds = Math.max(0, Math.round((Date.now() - lastMobilityRefreshAt) / 1000));
+  if (ageSeconds <= 1) return 'Updated just now';
+  return `Updated ${ageSeconds}s ago`;
+}
+
+function syncActiveRouteSelection(routeData, selectedId) {
+  if (!routeData || !Array.isArray(routeData.alternatives) || routeData.alternatives.length === 0) {
+    return null;
+  }
+
+  const selected = routeData.alternatives.find(candidate => candidate.id === selectedId) || routeData.alternatives[0];
+  routeData.selectedRouteId = selected.id;
+  routeData.selectedIndex = routeData.alternatives.findIndex(candidate => candidate.id === selected.id);
+  routeData.distance = selected.distance;
+  routeData.duration = selected.duration;
+  routeData.path = selected.path;
+  routeData.steps = selected.steps;
+  routeData.congestion = selected.congestion;
+  routeData.etaSeconds = getRouteEtaSeconds(selected);
+  return selected;
+}
+
+function stopMobilityRefreshLoop() {
+  if (mobilityRefreshTimerId !== null) {
+    clearInterval(mobilityRefreshTimerId);
+    mobilityRefreshTimerId = null;
+  }
+}
+
+function startMobilityRefreshLoop() {
+  stopMobilityRefreshLoop();
+  if (!activeRoute || !routeDestination) return;
+
+  mobilityRefreshTimerId = setInterval(() => {
+    refreshMobilityIntelligence({ notify: true, keepViewport: true });
+  }, MOBILITY_REFRESH_INTERVAL_MS);
+}
+
+function refreshMobilityIntelligence(options = {}) {
+  if (!activeRoute || !routeDestination || !Array.isArray(activeRoute.alternatives) || activeRoute.alternatives.length === 0) {
+    return false;
+  }
+
+  if (typeof optimizeRouteAlternatives !== 'function') {
+    return false;
+  }
+
+  const selectedRouteId = String(activeRoute.selectedRouteId || '');
+  const mode = activeRoute.optimizationMode || getSelectedRouteMode();
+  const edgeAiSignal = getEdgeAISignal();
+
+  const baseAlternatives = activeRoute.alternatives.map((candidate, index) => ({
+    id: String(candidate.id || `route_${index + 1}`),
+    label: String(candidate.label || `Route ${String.fromCharCode(65 + (index % 26))}`),
+    source: String(candidate.source || activeRoute.source || 'mobility-refresh'),
+    distance: Math.max(0, Number(candidate.distance || 0)),
+    duration: Math.max(0, Number(candidate.duration || 0)),
+    path: Array.isArray(candidate.path) ? candidate.path : [],
+    steps: Array.isArray(candidate.steps) ? candidate.steps : []
+  })).filter(candidate => candidate.path.length > 1 || candidate.steps.length > 0);
+
+  if (!baseAlternatives.length) {
+    return false;
+  }
+
+  const optimized = optimizeRouteAlternatives(baseAlternatives, mode, 'driving', {
+    hour: currentHour,
+    riskData: lastRiskData,
+    edgeAiScore: edgeAiSignal.anomalyScore,
+    edgeAiActive: edgeAiSignal.active
+  });
+
+  if (!optimized || !Array.isArray(optimized.alternatives) || optimized.alternatives.length === 0) {
+    return false;
+  }
+
+  activeRoute.optimizationMode = optimized.mode;
+  activeRoute.alternatives = optimized.alternatives;
+
+  const preferredSelection = activeRoute.alternatives.some(candidate => candidate.id === selectedRouteId)
+    ? selectedRouteId
+    : optimized.selectedRouteId;
+
+  const activeCandidate = syncActiveRouteSelection(activeRoute, preferredSelection);
+  if (!activeCandidate) {
+    return false;
+  }
+
+  lastMobilityRefreshAt = Date.now();
+
+  const recommendedCandidate = activeRoute.alternatives[0] || activeCandidate;
+  const etaGainSeconds = Math.max(0, getRouteEtaSeconds(activeCandidate) - getRouteEtaSeconds(recommendedCandidate));
+  const shouldSuggestSwitch =
+    Boolean(recommendedCandidate) &&
+    recommendedCandidate.id !== activeCandidate.id &&
+    etaGainSeconds >= MOBILITY_SWITCH_MIN_GAIN_SECONDS;
+
+  if (options.notify && shouldSuggestSwitch) {
+    const now = Date.now();
+    if (
+      now - lastMobilitySuggestionAt >= MOBILITY_NOTIFICATION_COOLDOWN_MS ||
+      lastMobilitySuggestedRouteId !== recommendedCandidate.id
+    ) {
+      showNotification(
+        `⚡ Better route detected: ${recommendedCandidate.label} can save ${formatDuration(etaGainSeconds)}.`,
+        'info',
+        4200
+      );
+      lastMobilitySuggestionAt = now;
+      lastMobilitySuggestedRouteId = recommendedCandidate.id;
+    }
+  }
+
+  if (options.redraw !== false) {
+    drawRoute(activeRoute, { preserveViewport: options.keepViewport !== false });
+  }
+
+  renderDirectionsPanel(activeRoute, routeDestination.label);
+  return true;
+}
+
+function refreshMobilityInsightNow() {
+  const refreshed = refreshMobilityIntelligence({ notify: false, keepViewport: true });
+  if (!refreshed) {
+    showNotification('No active route is available to refresh.', 'warning', 2200);
+    return;
+  }
+
+  showNotification('Mobility insight refreshed.', 'success', 1800);
+}
+
+function applyRecommendedRoute() {
+  if (!activeRoute || !Array.isArray(activeRoute.alternatives) || activeRoute.alternatives.length === 0) {
+    showNotification('Create a route first to apply AI recommendation.', 'warning', 2500);
+    return;
+  }
+
+  const recommended = activeRoute.alternatives.find(candidate => candidate.isRecommended) || activeRoute.alternatives[0];
+  if (!recommended) {
+    showNotification('No AI recommendation is available right now.', 'warning', 2200);
+    return;
+  }
+
+  if (recommended.id === activeRoute.selectedRouteId) {
+    showNotification('You are already on the best available route.', 'success', 1800);
+    return;
+  }
+
+  selectRouteAlternative(recommended.id);
 }
 
 function getCurrentLocation() {
@@ -1790,6 +1968,16 @@ function renderDirectionsPanel(route, destinationLabel) {
   const etaSeconds = Number.isFinite(activeCongestion.etaSeconds)
     ? Math.max(activeCandidate.duration || 0, activeCongestion.etaSeconds)
     : (activeCandidate.duration || 0);
+  const recommendedCandidate = alternatives.find(candidate => candidate.isRecommended) || alternatives[0] || activeCandidate;
+  const etaGainSeconds = Math.max(0, getRouteEtaSeconds(activeCandidate) - getRouteEtaSeconds(recommendedCandidate));
+  const shouldSwitch =
+    recommendedCandidate &&
+    recommendedCandidate.id !== activeCandidate.id &&
+    etaGainSeconds >= MOBILITY_SWITCH_MIN_GAIN_SECONDS;
+  const actionSummary = shouldSwitch
+    ? `Switch to ${recommendedCandidate.label} to save about ${formatDuration(etaGainSeconds)}.`
+    : 'Stay on the current route. It is already the best option right now.';
+  const actionMeta = `${getRouteRefreshAgeLabel()} • Edge AI ${edgeAiSignal.active ? 'active' : 'inactive'}`;
 
   const stepsMarkup = (Array.isArray(activeCandidate.steps) ? activeCandidate.steps : []).slice(0, 20).map((step, idx) => `
     <div class="direction-step" id="route-step-${idx}">
@@ -1852,6 +2040,14 @@ function renderDirectionsPanel(route, destinationLabel) {
         <div class="route-insight-detail">${escapeHtml(mobilityInsight.detail)}</div>
         <div class="route-insight-tags">${insightTagsMarkup || '<span class="route-insight-tag">No additional risk factors detected</span>'}</div>
       </div>
+      <div class="route-action-card ${shouldSwitch ? 'urgent' : 'stable'}">
+        <div class="route-action-title">Actionable Output</div>
+        <div class="route-action-text">${escapeHtml(actionSummary)}</div>
+        <div class="route-action-meta">${escapeHtml(actionMeta)}</div>
+        ${shouldSwitch
+    ? '<button class="search-btn directions-btn ai-action-btn" onclick="applyRecommendedRoute()">⚡ Apply AI Recommendation</button>'
+    : '<button class="search-btn ai-action-btn ai-action-secondary" onclick="refreshMobilityInsightNow()">↻ Refresh Mobility Insight</button>'}
+      </div>
       <div class="route-options">${optionCardsMarkup}</div>
       <div class="directions-actions">
         <button class="search-btn" onclick="speakRouteOverview()">🔊 Speak Overview</button>
@@ -1863,7 +2059,7 @@ function renderDirectionsPanel(route, destinationLabel) {
   `;
 }
 
-function drawRoute(routeData) {
+function drawRoute(routeData, options = {}) {
   clearRouteDrawing();
 
   const alternatives = Array.isArray(routeData && routeData.alternatives) && routeData.alternatives.length > 0
@@ -1900,7 +2096,7 @@ function drawRoute(routeData) {
   });
 
   const focusLayer = routeLayer || routeAlternativeLayers[0];
-  if (focusLayer) {
+  if (focusLayer && !options.preserveViewport) {
     map.fitBounds(focusLayer.getBounds(), { padding: [60, 60] });
   }
 }
@@ -1922,6 +2118,9 @@ function selectRouteAlternative(routeId) {
   activeRoute.path = nextRoute.path;
   activeRoute.steps = nextRoute.steps;
   activeRoute.congestion = nextRoute.congestion;
+  activeRoute.etaSeconds = getRouteEtaSeconds(nextRoute);
+  lastMobilityRefreshAt = Date.now();
+  lastMobilitySuggestedRouteId = '';
 
   routeStepIndex = 0;
   drawRoute(activeRoute);
@@ -1951,10 +2150,14 @@ async function startDirectionsTo(lat, lng, label = 'Destination') {
     activeRoute = route;
     routeDestination = { lat, lng, label };
     routeStepIndex = 0;
+    lastMobilityRefreshAt = Date.now();
+    lastMobilitySuggestionAt = 0;
+    lastMobilitySuggestedRouteId = '';
 
     drawRoute(route);
     renderDirectionsPanel(route, label);
     openDirectionsPanel();
+    startMobilityRefreshLoop();
 
     if (route.error) {
       showNotification('⚠️ Live routing unavailable. Showing direct fallback line.', 'warning', 4000);
@@ -2245,6 +2448,20 @@ document.addEventListener('DOMContentLoaded', () => {
   if (typeof EdgeAI !== 'undefined') {
     EdgeAI.subscribe(() => {
       refreshSelectedSidebar();
+      if (activeRoute && routeDestination) {
+        refreshMobilityIntelligence({ notify: false, keepViewport: true });
+      }
+    });
+  }
+
+  const routeModeSelect = document.getElementById('routeModeSelect');
+  if (routeModeSelect) {
+    routeModeSelect.addEventListener('change', () => {
+      if (!activeRoute || !routeDestination) return;
+
+      activeRoute.optimizationMode = getSelectedRouteMode();
+      refreshMobilityIntelligence({ notify: false, keepViewport: true });
+      showNotification(`Updated route mode: ${getRouteModeLabel(activeRoute.optimizationMode)}.`, 'info', 2200);
     });
   }
 

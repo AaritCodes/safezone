@@ -40,6 +40,12 @@ SafeZone is a comprehensive web application that provides real-time safety analy
 - **ℹ️ Disclaimers**: Clear warnings that scores are estimates
 - **📈 Factor Breakdown**: See exactly how your score was calculated
 
+### Smart Mobility Requirement Alignment
+- **Single Problem Solved**: Congestion-aware route optimization for faster and safer urban travel decisions
+- **Real-Time or Simulated Data**: Live Google/OSRM routing with deterministic congestion and risk simulation fallback
+- **Actionable Output in Seconds**: AI recommendation card suggests whether to stay or switch route, with one-tap apply
+- **Micro-Solution Scope**: Focused mobility intelligence module built around route decisions, not a full traffic platform
+
 ---
 
 ## 🚀 Quick Start

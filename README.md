@@ -223,12 +223,18 @@ Supports 30+ countries including:
 
 ```
 safezone/
-├── index.html          # Main HTML structure
-├── style.css           # All styling and animations
-├── app.js              # Core application logic
-├── data.js             # Data fetching and algorithms
-├── README.md           # This file
-└── IMPROVEMENTS.md     # Detailed changelog
+├── index.html              # Main HTML structure
+├── style.css               # Primary UI styling
+├── edge-ai.css             # Edge AI UI styling
+├── app.js                  # Core application logic
+├── data.js                 # Data fetching and scoring algorithms
+├── edge-ai.js              # Local sensor fusion logic
+├── sw.js                   # Service worker shell caching
+├── tests.js                # Jest test suite
+├── manifest.json           # PWA metadata
+├── EVALUATION_METRICS.md   # Rubric mapping and evidence
+├── IMPROVEMENTS.md         # Detailed changelog
+└── README.md               # This file
 ```
 
 ### File Descriptions
@@ -263,6 +269,15 @@ safezone/
 - Heatmap generation
 - Caching system
 - Request throttling
+
+**tests.js**
+- Unit/integration checks for risk scoring primitives
+- Hotspot normalization and ranking validation
+- Reliability weighting and model penalty assertions
+
+**sw.js**
+- Offline shell caching and runtime fetch strategy
+- Cache lifecycle management during activate/install
 
 ---
 
@@ -313,6 +328,33 @@ Edit the `calculateSafetyScore()` function in `data.js` to adjust weights:
 ```javascript
 const policeBonus = Math.min(20, policeCount * 6); // Adjust multiplier
 ```
+
+---
+
+## ✅ Testing
+
+### Run the test suite
+```bash
+npm install --save-dev jest
+npx jest tests.js --runInBand
+```
+
+### What is covered
+- Distance decay behavior across near/far ranges
+- Hotspot deduplication, ranking, and limit handling
+- Crime signal reliability scaling by source/coverage
+- Reliability-weighted model training penalties
+- Integration behavior between distance decay and hotspot ranking
+
+---
+
+## 🔐 Security Highlights
+
+- Dynamic UI content is escaped before HTML insertion to reduce XSS risk.
+- Phone inputs are sanitized before persistence or tel: usage.
+- API requests use timeout guards and fallback providers for degraded but safe behavior.
+- Service worker cache versioning prevents stale shell accumulation across releases.
+- Public safety scoring uses reliability weighting so low-confidence feeds do not over-penalize users.
 
 ---
 
@@ -643,6 +685,12 @@ SOFTWARE.
 
 ## 📈 Changelog
 
+### Version 2.1 (Security + Testing Update)
+- ✅ Expanded and documented risk-engine test coverage in `tests.js`
+- ✅ Added explicit README testing instructions and coverage summary
+- ✅ Clarified runtime security safeguards and fallback behavior
+- ✅ Updated project structure docs for service worker and Edge AI modules
+
 ### Version 2.0 (Current)
 - ✅ Added 30+ countries emergency numbers
 - ✅ Implemented notification system
@@ -679,4 +727,4 @@ SOFTWARE.
 
 **Built with ❤️ for safer communities worldwide**
 
-*Last Updated: 2024*
+*Last Updated: April 15, 2026*

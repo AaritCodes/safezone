@@ -59,7 +59,7 @@ This document verifies how SafeZone addresses all 7 evaluation metrics from the 
   - Event handlers use safe method calls (onclick on buttons, not eval)
 
 - **CORS & Content-Security Policy Ready:**
-  - Requests use HTTPS only (to Google, UK Police, OSM APIs)
+  - Requests use HTTPS only (to Google, India police/public crime feeds, OSM APIs)
   - No inline scripts (except app initialization)
 
 ### Security Gaps (Acknowledged):
@@ -134,7 +134,7 @@ This document verifies how SafeZone addresses all 7 evaluation metrics from the 
   - ✓ Preserves original properties after dedup
 
 **3. getCrimeSignalReliability (5 tests)**
-  - ✓ Returns 0.96 for uk-police-data at 100% coverage
+  - ✓ Returns 0.92 for india-police-data at 100% coverage
   - ✓ Scales with partial coverage (50%)
   - ✓ Returns moderate reliability for osm-proxy
   - ✓ Returns 0.28 for model-derived fallback
@@ -236,7 +236,7 @@ npm test
 ### Alignment Evidence:
 
 **1. Real-Time Monitoring** ✅
-- Fetches live UK Police crime data (updated hourly)
+- Fetches live India crime/theft signal feeds (with regional fallback)
 - Live CCTV camera streams (Google Street View integration)
 - Real-time route safety re-evaluation (9-second refresh interval)
 - WebSocket-ready for future live emergency dispatch feeds
@@ -263,7 +263,7 @@ npm test
 **5. Accuracy Improvements** ✅
 - Distance decay: Nearby risks weighted 7x higher than distant ones
 - Recency weighting: Yesterday's incident > week-old incident
-- Source reliability: UK Police (96%) > OSM proxy (78%) > model (28%)
+- Source reliability: India police/public feeds (~92%) > OSM proxy (78%) > model (28%)
 - Hotspot deduplication: Prevents clustering bias
 - Result: False positives reduced by ~70% vs. baseline
 

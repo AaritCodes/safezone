@@ -59,13 +59,15 @@ const normalizeAndRankHotspots = (hotspots, limit = 15) => {
     .map(({ severity, ...rest }) => rest);
 };
 
-// Crime signal reliability function
+// Crime signal reliability function (updated for India Police data)
 const getCrimeSignalReliability = (source, sampleCoveragePercent) => {
   const coverageWeight = Math.min(sampleCoveragePercent / 100, 1.0);
 
   switch (source) {
-    case "uk-police-data":
-      return 0.72 + 0.24 * coverageWeight;
+    case "india-police-data":
+      return 0.72 + 0.20 * coverageWeight;
+    case "india-police-karnataka":
+      return 0.78 + 0.20 * coverageWeight;
     case "osm-proxy":
       return 0.42 + 0.36 * coverageWeight;
     case "model-derived":
@@ -184,21 +186,27 @@ describe("SafeZone Risk Accuracy", () => {
   });
 
   describe("getCrimeSignalReliability", () => {
-    test("returns high reliability for uk-police-data with full coverage", () => {
-      const reliability = getCrimeSignalReliability("uk-police-data", 100);
-      expect(reliability).toBe(0.96);
+    test("returns high reliability for india-police-data with full coverage", () => {
+      const reliability = getCrimeSignalReliability("india-police-data", 100);
+      expect(reliability).toBe(0.92);
     });
 
-    test("returns lower reliability for uk-police-data with partial coverage", () => {
-      const low = getCrimeSignalReliability("uk-police-data", 50);
-      const high = getCrimeSignalReliability("uk-police-data", 100);
+    test("returns lower reliability for india-police-data with partial coverage", () => {
+      const low = getCrimeSignalReliability("india-police-data", 50);
+      const high = getCrimeSignalReliability("india-police-data", 100);
       expect(low).toBeLessThan(high);
       expect(low).toBeGreaterThan(0.72);
     });
 
+    test("returns higher reliability for karnataka police data", () => {
+      const reliability = getCrimeSignalReliability("india-police-karnataka", 100);
+      expect(reliability).toBe(0.98);
+      expect(reliability).toBeGreaterThan(getCrimeSignalReliability("india-police-data", 100));
+    });
+
     test("returns moderate reliability for osm-proxy", () => {
       const reliability = getCrimeSignalReliability("osm-proxy", 100);
-      expect(reliability).toBeLessThan(0.96);
+      expect(reliability).toBeLessThan(0.98);
       expect(reliability).toBeGreaterThan(0.42);
     });
 

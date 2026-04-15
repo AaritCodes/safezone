@@ -58,7 +58,8 @@ function sanitizePhoneNumber(phone) {
 function formatIncidentSourceLabel(source) {
   const key = String(source || 'unavailable');
   const labels = {
-    'uk-police-data': 'UK Police public crime feed',
+    'india-police-data': 'India Police public crime feed',
+    'india-police-karnataka': 'Karnataka Police crime feed',
     'osm-civic-risk-proxy': 'OpenStreetMap civic risk proxy',
     'model-derived-risk-proxy': 'Model-derived civic proxy',
     'crime-feed-error': 'Crime feed temporary error',
@@ -845,10 +846,10 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
       <div class="zone-name">${escapeHtml(areaInfo.name)} • ${formatTime(currentHour)}</div>
       <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">${escapeHtml(areaInfo.area || '')}</div>
 
-      <button class="favorite-btn ${isFavorite ? 'active' : ''}" onclick="toggleFavorite(${lat}, ${lng}, '${safeAreaName}')">
+      <button class="favorite-btn ${isFavorite ? 'active' : ''}" onclick="toggleFavorite(${lat}, ${lng}, '${safeAreaName}')" aria-label="${isFavorite ? 'Remove' : 'Save'} location ${escapeHtml(areaInfo.name)}">
         ${isFavorite ? '⭐ Saved' : '☆ Save Location'}
       </button>
-      <button class="route-now-btn" onclick="startDirectionsTo(${lat}, ${lng}, '${safeAreaName}')">
+      <button class="route-now-btn" onclick="startDirectionsTo(${lat}, ${lng}, '${safeAreaName}')" aria-label="Get turn-by-turn directions to ${escapeHtml(areaInfo.name)}">
         🧭 Directions Here
       </button>
     </div>
@@ -2055,14 +2056,14 @@ function renderDirectionsPanel(route, destinationLabel) {
         <div class="route-action-text">${escapeHtml(actionSummary)}</div>
         <div class="route-action-meta">${escapeHtml(actionMeta)}</div>
         ${shouldSwitch
-    ? '<button class="search-btn directions-btn ai-action-btn" onclick="applyRecommendedRoute()">⚡ Apply AI Recommendation</button>'
-    : '<button class="search-btn ai-action-btn ai-action-secondary" onclick="refreshMobilityInsightNow()">↻ Refresh Mobility Insight</button>'}
+    ? '<button class="search-btn directions-btn ai-action-btn" onclick="applyRecommendedRoute()" aria-label="Apply AI recommended route change for better safety">⚡ Apply AI Recommendation</button>'
+    : '<button class="search-btn ai-action-btn ai-action-secondary" onclick="refreshMobilityInsightNow()" aria-label="Refresh mobility insight and re-evaluate route conditions">↻ Refresh Mobility Insight</button>'}
       </div>
       <div class="route-options">${optionCardsMarkup}</div>
       <div class="directions-actions">
-        <button class="search-btn" onclick="speakRouteOverview()">🔊 Speak Overview</button>
-        <button class="search-btn directions-btn" onclick="startVoiceNavigation()">🎙 Start Voice Guidance</button>
-        <button class="search-btn" onclick="stopVoiceNavigation()">⏹ Stop</button>
+        <button class="search-btn" onclick="speakRouteOverview()" aria-label="Listen to route overview using text to speech">🔊 Speak Overview</button>
+        <button class="search-btn directions-btn" onclick="startVoiceNavigation()" aria-label="Activate voice-guided turn-by-turn navigation">🎙 Start Voice Guidance</button>
+        <button class="search-btn" onclick="stopVoiceNavigation()" aria-label="Stop voice navigation">⏹ Stop</button>
       </div>
     </div>
     <div class="directions-steps">${stepsMarkup}</div>
@@ -2346,8 +2347,8 @@ function renderEmergencyContacts() {
         <div class="contact-phone">${escapeHtml(contact.phone)}</div>
       </div>
       <div class="contact-actions">
-        <button class="contact-action call" onclick="callEmergencyContact('${contact.id}')">Call</button>
-        <button class="contact-action remove" onclick="removeEmergencyContact('${contact.id}')">Remove</button>
+        <button class="contact-action call" onclick="callEmergencyContact('${contact.id}')" aria-label="Call ${escapeHtml(contact.name)} at ${escapeHtml(contact.phone)}">Call</button>
+        <button class="contact-action remove" onclick="removeEmergencyContact('${contact.id}')" aria-label="Remove ${escapeHtml(contact.name)} from emergency contacts">Remove</button>
       </div>
     </div>
   `).join('');

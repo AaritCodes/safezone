@@ -485,6 +485,9 @@ const VIOLENT_CATEGORIES = new Set([
   'possession-of-weapons'
 ]);
 
+const RISK_SIGNAL_MAX_RADIUS_METERS = 2600;
+const HOTSPOT_DEDUPLICATION_GRID_SIZE = 0.00045;
+
 function getThrottleHostKey(url) {
   const raw = typeof url === 'string'
     ? url
@@ -1014,8 +1017,136 @@ function pseudoRandomFromCoords(lat, lng, salt = 0) {
   return n - Math.floor(n);
 }
 
+function clampRiskValue(value, min, max) {
+  if (!Number.isFinite(value)) return min;
+  return Math.max(min, Math.min(max, value));
+}
+
+function extractElementCoordinates(element) {
+  const lat = Number(element && (typeof element.lat !== 'undefined' ? element.lat : (element.center && element.center.lat)));
+  const lng = Number(element && (typeof element.lon !== 'undefined' ? element.lon : (element.center && element.center.lon)));
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return { lat, lng };
+}
+
+function getDistanceDecayWeight(distanceMeters, nearRadius = 180, farRadius = RISK_SIGNAL_MAX_RADIUS_METERS) {
+  if (!Number.isFinite(distanceMeters)) return 0.25;
+  if (distanceMeters <= nearRadius) return 1;
+  if (distanceMeters >= farRadius) return 0.14;
+
+  const ratio = (distanceMeters - nearRadius) / Math.max(1, farRadius - nearRadius);
+  return 1 - ratio * 0.86;
+}
+
+function normalizeAndRankHotspots(hotspots, centerLat, centerLng, limit = 40) {
+  const deduped = new Map();
+
+  (hotspots || []).forEach((hotspot) => {
+    const lat = Number(hotspot && hotspot.lat);
+    const lng = Number(hotspot && hotspot.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+    const severity = Number.isFinite(hotspot.severity) ? Number(hotspot.severity) : 1;
+    const distance = getDistance(centerLat, centerLng, lat, lng);
+    const gridLat = Math.round(lat / HOTSPOT_DEDUPLICATION_GRID_SIZE);
+    const gridLng = Math.round(lng / HOTSPOT_DEDUPLICATION_GRID_SIZE);
+    const key = `${gridLat}:${gridLng}:${String(hotspot.type || 'risk')}`;
+    const existing = deduped.get(key);
+
+    if (!existing || severity > existing.severity) {
+      deduped.set(key, {
+        ...hotspot,
+        lat,
+        lng,
+        severity,
+        distance: Math.round(distance)
+      });
+    }
+  });
+
+  return Array.from(deduped.values())
+    .sort((a, b) => {
+      if (Math.abs(Number(b.severity || 0) - Number(a.severity || 0)) > 0.05) {
+        return Number(b.severity || 0) - Number(a.severity || 0);
+      }
+      return Number(a.distance || Infinity) - Number(b.distance || Infinity);
+    })
+    .slice(0, limit)
+    .map((hotspot) => ({
+      lat: hotspot.lat,
+      lng: hotspot.lng,
+      title: hotspot.title,
+      type: hotspot.type,
+      source: hotspot.source
+    }));
+}
+
+function getCrimeRecencyWeight(monthText) {
+  const month = String(monthText || '').trim();
+  if (!/^\d{4}-\d{2}$/.test(month)) return 0.78;
+
+  const year = Number(month.slice(0, 4));
+  const monthIndex = Number(month.slice(5, 7));
+  if (!Number.isFinite(year) || !Number.isFinite(monthIndex) || monthIndex < 1 || monthIndex > 12) {
+    return 0.78;
+  }
+
+  const now = new Date();
+  const ageMonths = Math.max(0, (now.getFullYear() - year) * 12 + (now.getMonth() + 1 - monthIndex));
+  return clampRiskValue(1 - ageMonths * 0.08, 0.52, 1);
+}
+
+function getCrimeSignalReliability(crimeData) {
+  if (!crimeData || crimeData.error) return 0.12;
+
+  const total = Math.max(0, Number(crimeData.total || 0));
+  const coverage = clampRiskValue(Number(crimeData.coverage || 0), 0, 1);
+
+  if (crimeData.source === 'uk-police-data') {
+    const scale = clampRiskValue(total / 70, 0.18, 1);
+    return clampRiskValue(0.72 + scale * 0.22, 0.72, 0.96);
+  }
+
+  if (crimeData.source === 'osm-civic-risk-proxy') {
+    return clampRiskValue(0.42 + coverage * 0.36, 0.42, 0.78);
+  }
+
+  if (crimeData.source === 'model-derived-risk-proxy') {
+    return 0.28;
+  }
+
+  return 0.35;
+}
+
+function getAccidentSignalReliability(accidentData) {
+  if (!accidentData || accidentData.error) return 0.12;
+
+  const sampleCount = Math.max(0, Number(accidentData.hazardCount || 0) + Number(accidentData.signalCount || 0));
+  const coverage = clampRiskValue(Number(accidentData.coverage || 0), 0, 1);
+  const sampleScale = clampRiskValue(sampleCount / 40, 0.1, 1);
+
+  if (accidentData.source === 'osm-road-signals') {
+    return clampRiskValue(0.46 + sampleScale * 0.24 + coverage * 0.12, 0.46, 0.82);
+  }
+
+  return 0.3;
+}
+
+function getRiskConfidenceLabel(combinedReliability, crimeData) {
+  const reliability = clampRiskValue(combinedReliability, 0, 1);
+  const hasDirectCrimeFeed = Boolean(crimeData && crimeData.source === 'uk-police-data' && !crimeData.error);
+
+  if (hasDirectCrimeFeed && reliability >= 0.74) return 'high';
+  if (reliability >= 0.68) return 'high';
+  if (reliability >= 0.42) return 'medium';
+  return 'low';
+}
+
 function buildRegionalCrimeProxySignals(elements, lat, lng) {
   const nightlifeAmenities = new Set(['bar', 'pub', 'nightclub']);
+  const transitAmenities = new Set(['bus_station', 'taxi']);
+  const commerceAmenities = new Set(['marketplace']);
 
   let nightlife = 0;
   let liquorShops = 0;
@@ -1024,90 +1155,138 @@ function buildRegionalCrimeProxySignals(elements, lat, lng) {
   let transit = 0;
   let police = 0;
   let surveillance = 0;
+  let streetLights = 0;
+  let theftPressure = 0;
+  let violentPressure = 0;
+  let protectionPressure = 0;
   const hotspots = [];
 
   (elements || []).forEach((el) => {
-    const elLat = el.lat || (el.center && el.center.lat);
-    const elLng = el.lon || (el.center && el.center.lon);
-    if (!elLat || !elLng) return;
+    const coords = extractElementCoordinates(el);
+    if (!coords) return;
 
+    const distance = getDistance(lat, lng, coords.lat, coords.lng);
+    if (!Number.isFinite(distance) || distance > RISK_SIGNAL_MAX_RADIUS_METERS) return;
+
+    const distanceWeight = getDistanceDecayWeight(distance);
     const tags = el.tags || {};
-    const amenity = tags.amenity || '';
-    const shop = tags.shop || '';
-    const manMade = tags.man_made || '';
-    const highway = tags.highway || '';
-    const railway = tags.railway || '';
+    const amenity = String(tags.amenity || '').toLowerCase();
+    const shop = String(tags.shop || '').toLowerCase();
+    const manMade = String(tags.man_made || '').toLowerCase();
+    const highway = String(tags.highway || '').toLowerCase();
+    const railway = String(tags.railway || '').toLowerCase();
 
     if (nightlifeAmenities.has(amenity)) {
       nightlife += 1;
+      violentPressure += 2.2 * distanceWeight;
+      theftPressure += 0.45 * distanceWeight;
       hotspots.push({
-        lat: elLat,
-        lng: elLng,
+        lat: coords.lat,
+        lng: coords.lng,
         title: tags.name || amenity,
         type: 'violent',
-        source: 'OSM Civic Proxy'
+        source: 'OSM Civic Proxy',
+        severity: 1.4 + distanceWeight * 1.8
       });
       return;
     }
 
     if (shop === 'alcohol') {
       liquorShops += 1;
+      theftPressure += 1.85 * distanceWeight;
+      violentPressure += 0.4 * distanceWeight;
       hotspots.push({
-        lat: elLat,
-        lng: elLng,
+        lat: coords.lat,
+        lng: coords.lng,
         title: tags.name || 'alcohol shop',
         type: 'theft',
-        source: 'OSM Civic Proxy'
+        source: 'OSM Civic Proxy',
+        severity: 1.2 + distanceWeight * 1.45
       });
       return;
     }
 
     if (amenity === 'atm' || amenity === 'bank') {
       atms += 1;
+      theftPressure += 1.45 * distanceWeight;
       hotspots.push({
-        lat: elLat,
-        lng: elLng,
+        lat: coords.lat,
+        lng: coords.lng,
         title: tags.name || amenity,
         type: 'theft',
-        source: 'OSM Civic Proxy'
+        source: 'OSM Civic Proxy',
+        severity: 1.1 + distanceWeight * 1.25
       });
       return;
     }
 
     if (amenity === 'parking' || tags.parking || amenity === 'parking_entrance') {
       parking += 1;
+      theftPressure += 1.08 * distanceWeight;
       hotspots.push({
-        lat: elLat,
-        lng: elLng,
+        lat: coords.lat,
+        lng: coords.lng,
         title: tags.name || 'parking zone',
         type: 'theft',
-        source: 'OSM Civic Proxy'
+        source: 'OSM Civic Proxy',
+        severity: 0.95 + distanceWeight * 1.05
       });
       return;
     }
 
-    if (highway === 'bus_stop' || railway === 'station' || railway === 'halt' || railway === 'subway_entrance') {
+    if (
+      highway === 'bus_stop' ||
+      railway === 'station' ||
+      railway === 'halt' ||
+      railway === 'subway_entrance' ||
+      transitAmenities.has(amenity)
+    ) {
       transit += 1;
+      theftPressure += 0.48 * distanceWeight;
+      violentPressure += 0.82 * distanceWeight;
+      if (distanceWeight > 0.26) {
+        hotspots.push({
+          lat: coords.lat,
+          lng: coords.lng,
+          title: tags.name || 'transit hub',
+          type: 'crime',
+          source: 'OSM Civic Proxy',
+          severity: 0.55 + distanceWeight * 0.9
+        });
+      }
+      return;
+    }
+
+    if (commerceAmenities.has(amenity)) {
+      theftPressure += 0.62 * distanceWeight;
       return;
     }
 
     if (amenity === 'police') {
       police += 1;
+      protectionPressure += 3.4 * distanceWeight;
       return;
     }
 
     if (manMade === 'surveillance' || amenity === 'cctv') {
       surveillance += 1;
+      protectionPressure += 1.15 * distanceWeight;
+      return;
+    }
+
+    if (highway === 'street_lamp') {
+      streetLights += 1;
+      protectionPressure += 0.2 * distanceWeight;
     }
   });
 
-  const exposure = nightlife * 1.8 + liquorShops * 1.35 + atms * 1.2 + parking * 0.85 + transit * 0.45;
-  const protection = police * 3.2 + surveillance * 0.9;
+  const theftScore = Math.max(0, theftPressure - protectionPressure * 0.72);
+  const violentScore = Math.max(0, violentPressure - protectionPressure * 0.54);
 
-  const theftPressure = Math.max(0, exposure - protection * 0.55);
-  const theftCount = Math.min(36, Math.round(theftPressure));
-  const violentCount = Math.min(16, Math.round(nightlife * 0.7 + Math.max(0, transit - police) * 0.2));
+  const theftCount = Math.min(42, Math.round(theftScore * 2.1));
+  const violentCount = Math.min(20, Math.round(violentScore * 1.75));
   const total = theftCount + violentCount;
+  const signalCoverage = clampRiskValue((nightlife + liquorShops + atms + parking + transit + police + surveillance + streetLights) / 34, 0, 1);
 
   return {
     source: 'osm-civic-risk-proxy',
@@ -1115,11 +1294,13 @@ function buildRegionalCrimeProxySignals(elements, lat, lng) {
     total,
     theftCount,
     violentCount,
-    hotspots: hotspots.slice(0, 30),
+    hotspots: normalizeAndRankHotspots(hotspots, lat, lng, 30),
     proxy: true,
+    coverage: signalCoverage,
     guardSignals: {
       police,
-      surveillance
+      surveillance,
+      streetLights
     }
   };
 }
@@ -1154,7 +1335,8 @@ function generateFallbackCrimeProxySignals(lat, lng) {
       }
     ],
     proxy: true,
-    estimated: true
+    estimated: true,
+    coverage: 0.18
   };
 }
 
@@ -1162,12 +1344,15 @@ async function fetchRegionalCrimeProxySignals(lat, lng, radius = 2200) {
   const query = `
     [out:json][timeout:10];
     (
-      node["amenity"~"bar|pub|nightclub|atm|bank|parking|parking_entrance|police|cctv"](around:${radius},${lat},${lng});
-      way["amenity"~"bar|pub|nightclub|atm|bank|parking|parking_entrance|police|cctv"](around:${radius},${lat},${lng});
+      node["amenity"~"bar|pub|nightclub|atm|bank|parking|parking_entrance|police|cctv|marketplace|bus_station|taxi"](around:${radius},${lat},${lng});
+      way["amenity"~"bar|pub|nightclub|atm|bank|parking|parking_entrance|police|cctv|marketplace|bus_station|taxi"](around:${radius},${lat},${lng});
       node["shop"="alcohol"](around:${radius},${lat},${lng});
       way["shop"="alcohol"](around:${radius},${lat},${lng});
       node["highway"="bus_stop"](around:${radius},${lat},${lng});
+      node["highway"="street_lamp"](around:${Math.round(radius * 0.7)},${lat},${lng});
+      way["highway"="street_lamp"](around:${Math.round(radius * 0.7)},${lat},${lng});
       node["railway"~"station|halt|subway_entrance"](around:${radius},${lat},${lng});
+      way["railway"~"station|halt|subway_entrance"](around:${radius},${lat},${lng});
       node["man_made"="surveillance"](around:${radius},${lat},${lng});
       way["man_made"="surveillance"](around:${radius},${lat},${lng});
     );
@@ -1209,19 +1394,21 @@ function saveRiskModel(model) {
   }
 }
 
-function trainRiskModel(crimeData, accidentData) {
+function trainRiskModel(crimeData, accidentData, reliability = 0.5) {
   const model = loadRiskModel();
-  const theftSignal = crimeData.theftCount * 2.2;
-  const violentSignal = crimeData.violentCount * 1.6;
-  const accidentSignal = accidentData.weightedRisk;
-  const observed = theftSignal + violentSignal + accidentSignal;
+  const reliabilityWeight = clampRiskValue(reliability, 0.2, 1);
+  const theftSignal = Number(crimeData.theftCount || 0) * 2.1;
+  const violentSignal = Number(crimeData.violentCount || 0) * 1.75;
+  const accidentSignal = Number(accidentData.weightedRisk || 0) * 1.05;
+  const observedRaw = theftSignal + violentSignal + accidentSignal;
+  const observed = observedRaw * (0.65 + reliabilityWeight * 0.55);
 
   model.samples += 1;
-  const alpha = model.samples < 6 ? 0.35 : 0.18;
+  const alpha = model.samples < 6 ? 0.34 : 0.16;
   model.avgObserved = model.avgObserved * (1 - alpha) + observed * alpha;
-  model.avgTheft = model.avgTheft * (1 - alpha) + crimeData.theftCount * alpha;
-  model.avgViolent = model.avgViolent * (1 - alpha) + crimeData.violentCount * alpha;
-  model.avgAccident = model.avgAccident * (1 - alpha) + accidentData.weightedRisk * alpha;
+  model.avgTheft = model.avgTheft * (1 - alpha) + Number(crimeData.theftCount || 0) * alpha;
+  model.avgViolent = model.avgViolent * (1 - alpha) + Number(crimeData.violentCount || 0) * alpha;
+  model.avgAccident = model.avgAccident * (1 - alpha) + Number(accidentData.weightedRisk || 0) * alpha;
   model.updatedAt = Date.now();
   saveRiskModel(model);
 
@@ -1229,15 +1416,21 @@ function trainRiskModel(crimeData, accidentData) {
   let penalty = 0;
 
   if (observed > 0) {
-    penalty = Math.round(observed * 0.8 + Math.max(0, delta) * 1.4);
-    penalty = Math.max(0, Math.min(24, penalty));
+    penalty = Math.round((observed * 0.76 + Math.max(0, delta) * (1.1 + reliabilityWeight * 0.6)) * reliabilityWeight);
+    penalty = Math.max(0, Math.min(26, penalty));
   }
 
   const factors = [];
-  if (crimeData.theftCount > 0) factors.push(`${crimeData.theftCount} recent theft-related reports`);
-  if (crimeData.violentCount > 0) factors.push(`${crimeData.violentCount} recent violent/public-order reports`);
-  if (accidentData.hazardCount > 0) factors.push(`${accidentData.hazardCount} mapped road hazard tags nearby`);
-  if (accidentData.signalCount > 0) factors.push(`${accidentData.signalCount} dense traffic-conflict points`);
+  const theftCount = Math.round(Number(crimeData.theftCount || 0));
+  const violentCount = Math.round(Number(crimeData.violentCount || 0));
+  const hazardCount = Math.round(Number(accidentData.hazardCount || 0));
+  const signalCount = Math.round(Number(accidentData.signalCount || 0));
+
+  if (theftCount > 0) factors.push(`${theftCount} weighted theft signals nearby`);
+  if (violentCount > 0) factors.push(`${violentCount} weighted violent/public-order signals nearby`);
+  if (hazardCount > 0) factors.push(`${hazardCount} mapped road hazard tags nearby`);
+  if (signalCount > 0) factors.push(`${signalCount} dense traffic-conflict points`);
+  if (reliabilityWeight < 0.5) factors.push('Signal confidence is limited; risk penalty is conservatively scaled');
 
   if (factors.length === 0) {
     factors.push('No elevated public incident pressure detected in current feeds');
@@ -1246,7 +1439,8 @@ function trainRiskModel(crimeData, accidentData) {
   return {
     penalty,
     factors,
-    baseline: model.avgObserved
+    baseline: model.avgObserved,
+    reliability: Number((reliabilityWeight * 100).toFixed(1))
   };
 }
 
@@ -1263,27 +1457,64 @@ async function fetchRecentCrimeSignals(lat, lng) {
     }
 
     const crimes = await response.json();
-    const theftCount = crimes.filter(c => THEFT_CATEGORIES.has(c.category)).length;
-    const violentCount = crimes.filter(c => VIOLENT_CATEGORIES.has(c.category)).length;
+    const crimeRows = Array.isArray(crimes) ? crimes : [];
+    let weightedTheft = 0;
+    let weightedViolent = 0;
+    let weightedTotal = 0;
+    let locatedReports = 0;
+    const hotspotCandidates = [];
 
-    const hotspots = crimes
-      .filter(c => c.location && c.location.latitude && c.location.longitude)
-      .slice(0, 30)
-      .map(c => ({
-        lat: parseFloat(c.location.latitude),
-        lng: parseFloat(c.location.longitude),
-        title: c.category.replace(/-/g, ' '),
-        type: THEFT_CATEGORIES.has(c.category) ? 'theft' : (VIOLENT_CATEGORIES.has(c.category) ? 'violent' : 'crime'),
-        source: 'UK Police Data'
-      }));
+    crimeRows.forEach((crime) => {
+      const location = crime && crime.location ? crime.location : null;
+      const crimeLat = Number(location && location.latitude);
+      const crimeLng = Number(location && location.longitude);
+      if (!Number.isFinite(crimeLat) || !Number.isFinite(crimeLng)) return;
+
+      locatedReports += 1;
+
+      const category = String(crime && crime.category ? crime.category : 'crime').toLowerCase();
+      const isTheft = THEFT_CATEGORIES.has(category);
+      const isViolent = VIOLENT_CATEGORIES.has(category);
+      const distance = getDistance(lat, lng, crimeLat, crimeLng);
+      const distanceWeight = getDistanceDecayWeight(distance, 160, 2500);
+      const recencyWeight = getCrimeRecencyWeight(crime && crime.month);
+      const combinedWeight = distanceWeight * recencyWeight;
+      const baseSignal = isViolent ? 1.75 : (isTheft ? 1.35 : 0.52);
+
+      weightedTotal += combinedWeight * baseSignal;
+      if (isTheft) weightedTheft += combinedWeight * 1.55;
+      if (isViolent) weightedViolent += combinedWeight * 1.65;
+
+      if (isTheft || isViolent || (distance < 1200 && combinedWeight > 0.38)) {
+        hotspotCandidates.push({
+          lat: crimeLat,
+          lng: crimeLng,
+          title: category.replace(/-/g, ' '),
+          type: isTheft ? 'theft' : (isViolent ? 'violent' : 'crime'),
+          source: 'UK Police Data',
+          severity: combinedWeight * (isViolent ? 2.1 : (isTheft ? 1.75 : 1.05))
+        });
+      }
+    });
+
+    const theftCount = Math.min(48, Math.round(weightedTheft));
+    const violentCount = Math.min(26, Math.round(weightedViolent));
+    const total = Math.max(theftCount + violentCount, Math.round(weightedTotal));
+    const month = crimeRows[0] && crimeRows[0].month ? crimeRows[0].month : 'latest';
+    const coverage = crimeRows.length > 0
+      ? clampRiskValue(locatedReports / crimeRows.length, 0, 1)
+      : 0;
 
     return {
       source: 'uk-police-data',
-      month: crimes[0] && crimes[0].month ? crimes[0].month : 'latest',
-      total: crimes.length,
+      month,
+      total,
+      rawTotal: crimeRows.length,
+      locatedReports,
       theftCount,
       violentCount,
-      hotspots
+      hotspots: normalizeAndRankHotspots(hotspotCandidates, lat, lng, 35),
+      coverage
     };
   } catch (err) {
     console.warn('Crime signal fetch failed:', err);
@@ -1294,57 +1525,112 @@ async function fetchRecentCrimeSignals(lat, lng) {
       theftCount: 0,
       violentCount: 0,
       hotspots: [],
+      coverage: 0,
       error: 'API_FAILED'
     };
   }
 }
 
 async function fetchAccidentRiskSignals(lat, lng, radius = 2000) {
+  const signalRadius = Math.round(radius * 0.72);
+  const conflictRadius = Math.round(radius * 0.62);
+
   const query = `
-    [out:json][timeout:5];
+    [out:json][timeout:8];
     (
       node["hazard"~"accident|dangerous_curve|slippery|falling_rocks"](around:${radius},${lat},${lng});
+      way["hazard"~"accident|dangerous_curve|slippery|falling_rocks"](around:${radius},${lat},${lng});
       node["accident"](around:${radius},${lat},${lng});
-      node["highway"="traffic_signals"](around:${Math.round(radius * 0.6)},${lat},${lng});
+      way["accident"](around:${radius},${lat},${lng});
+      node["highway"="traffic_signals"](around:${signalRadius},${lat},${lng});
+      way["highway"="traffic_signals"](around:${signalRadius},${lat},${lng});
+      node["junction"~"roundabout|circular"](around:${conflictRadius},${lat},${lng});
+      way["junction"~"roundabout|circular"](around:${conflictRadius},${lat},${lng});
+      node["highway"="crossing"](around:${conflictRadius},${lat},${lng});
+      way["highway"="crossing"](around:${conflictRadius},${lat},${lng});
     );
-    out body;
+    out center body;
   `;
 
   try {
-    const { data } = await fetchOverpassJson(query, 5000);
+    const { data } = await fetchOverpassJson(query, 7000);
     const hotspots = [];
     let hazardCount = 0;
     let signalCount = 0;
+    let hazardScore = 0;
+    let conflictScore = 0;
 
-    (data.elements || []).forEach((el, i) => {
-      const elLat = el.lat || (el.center && el.center.lat);
-      const elLng = el.lon || (el.center && el.center.lon);
-      if (!elLat || !elLng) return;
+    (data.elements || []).forEach((el) => {
+      const coords = extractElementCoordinates(el);
+      if (!coords) return;
+
+      const distance = getDistance(lat, lng, coords.lat, coords.lng);
+      if (!Number.isFinite(distance) || distance > Math.round(radius * 1.2)) return;
+
+      const distanceWeight = getDistanceDecayWeight(distance, 120, Math.round(radius * 1.2));
 
       const tags = el.tags || {};
-      const isSignal = tags.highway === 'traffic_signals';
-      const label = tags.hazard || tags.accident || (isSignal ? 'traffic_signals' : 'risk_signal');
+      const hazardTag = String(tags.hazard || tags.accident || '').toLowerCase();
+      const highwayTag = String(tags.highway || '').toLowerCase();
+      const junctionTag = String(tags.junction || '').toLowerCase();
 
-      if (isSignal) signalCount += 1;
-      else hazardCount += 1;
+      const isSignal = highwayTag === 'traffic_signals';
+      const isConflictPoint = isSignal || highwayTag === 'crossing' || junctionTag === 'roundabout' || junctionTag === 'circular';
+
+      if (hazardTag) {
+        hazardCount += 1;
+
+        let severity = 1.8;
+        if (hazardTag.includes('dangerous_curve')) severity = 2.9;
+        else if (hazardTag.includes('slippery')) severity = 2.3;
+        else if (hazardTag.includes('falling_rocks')) severity = 3.1;
+        else if (hazardTag.includes('accident')) severity = 2.4;
+
+        hazardScore += severity * distanceWeight;
+
+        hotspots.push({
+          lat: coords.lat,
+          lng: coords.lng,
+          title: hazardTag.replace(/_/g, ' '),
+          type: 'accident',
+          source: 'OpenStreetMap',
+          severity: severity * distanceWeight + 0.5
+        });
+        return;
+      }
+
+      if (!isConflictPoint) return;
+
+      signalCount += 1;
+      const conflictSeverity = isSignal
+        ? 0.58
+        : (highwayTag === 'crossing' ? 0.75 : 0.88);
+      conflictScore += conflictSeverity * distanceWeight;
+
+      const label = isSignal
+        ? 'traffic signals'
+        : (highwayTag === 'crossing' ? 'crossing conflict point' : 'junction conflict point');
 
       hotspots.push({
-        lat: elLat,
-        lng: elLng,
-        title: label.replace(/_/g, ' '),
-        type: isSignal ? 'traffic' : 'accident',
-        source: 'OpenStreetMap'
+        lat: coords.lat,
+        lng: coords.lng,
+        title: label,
+        type: 'traffic',
+        source: 'OpenStreetMap',
+        severity: conflictSeverity * distanceWeight + 0.3
       });
     });
 
-    const weightedRisk = hazardCount * 2 + signalCount * 0.25;
+    const weightedRisk = Number((hazardScore * 1.7 + conflictScore).toFixed(2));
+    const coverage = clampRiskValue((hazardCount + signalCount) / 46, 0, 1);
 
     return {
       source: 'osm-road-signals',
       hazardCount,
       signalCount,
       weightedRisk,
-      hotspots: hotspots.slice(0, 40)
+      coverage,
+      hotspots: normalizeAndRankHotspots(hotspots, lat, lng, 40)
     };
   } catch (err) {
     console.warn('Accident signal fetch failed:', err);
@@ -1354,6 +1640,7 @@ async function fetchAccidentRiskSignals(lat, lng, radius = 2000) {
       signalCount: 0,
       weightedRisk: 0,
       hotspots: [],
+      coverage: 0,
       error: 'API_FAILED'
     };
   }
@@ -1370,27 +1657,46 @@ async function fetchPublicSafetyRisk(lat, lng) {
     const accidentFeedFailed = Boolean(accidentData.error);
     const criticalError = crimeFeedFailed && accidentFeedFailed;
 
-    const modelOutput = trainRiskModel(crimeData, accidentData);
+    const crimeReliability = getCrimeSignalReliability(crimeData);
+    const accidentReliability = getAccidentSignalReliability(accidentData);
+    const combinedReliability = clampRiskValue((crimeReliability * 0.62) + (accidentReliability * 0.38), 0, 1);
+    const modelOutput = trainRiskModel(crimeData, accidentData, combinedReliability);
+    const confidence = getRiskConfidenceLabel(combinedReliability, crimeData);
 
-    let confidence = 'low';
-    if (crimeData.source === 'uk-police-data') confidence = 'high';
-    else if (accidentData.hotspots.length > 0) confidence = 'medium';
+    const factors = Array.isArray(modelOutput.factors) ? [...modelOutput.factors] : [];
+    if (combinedReliability < 0.45) {
+      factors.push('Low-confidence regional coverage; estimates are conservative');
+    } else if (combinedReliability > 0.72) {
+      factors.push('High-confidence multi-source risk agreement');
+    }
+
+    const mergedHotspots = normalizeAndRankHotspots(
+      [...(crimeData.hotspots || []), ...(accidentData.hotspots || [])],
+      lat,
+      lng,
+      50
+    );
 
     return {
-      theftCount: crimeData.theftCount,
-      violentCount: crimeData.violentCount,
-      totalCrime: crimeData.total,
-      accidentHotspots: accidentData.hazardCount,
-      conflictPoints: accidentData.signalCount,
+      theftCount: Math.max(0, Math.round(Number(crimeData.theftCount || 0))),
+      violentCount: Math.max(0, Math.round(Number(crimeData.violentCount || 0))),
+      totalCrime: Math.max(0, Math.round(Number(crimeData.total || 0))),
+      accidentHotspots: Math.max(0, Math.round(Number(accidentData.hazardCount || 0))),
+      conflictPoints: Math.max(0, Math.round(Number(accidentData.signalCount || 0))),
       penalty: modelOutput.penalty,
-      factors: modelOutput.factors,
+      factors,
       baseline: modelOutput.baseline,
       confidence,
+      reliabilityScore: Number((combinedReliability * 100).toFixed(1)),
       month: crimeData.month,
-      hotspots: [...crimeData.hotspots, ...accidentData.hotspots].slice(0, 50),
+      hotspots: mergedHotspots,
       sources: {
         crime: crimeData.source,
         accidents: accidentData.source
+      },
+      dataQuality: {
+        crime: Number((crimeReliability * 100).toFixed(1)),
+        accidents: Number((accidentReliability * 100).toFixed(1))
       },
       partialError: crimeFeedFailed || accidentFeedFailed,
       criticalError,
@@ -1407,10 +1713,15 @@ async function fetchPublicSafetyRisk(lat, lng) {
       penalty: 0,
       factors: ['Public risk feeds unavailable, using base model only'],
       confidence: 'low',
+      reliabilityScore: 0,
       hotspots: [],
       sources: {
         crime: 'unavailable',
         accidents: 'unavailable'
+      },
+      dataQuality: {
+        crime: 0,
+        accidents: 0
       },
       partialError: true,
       criticalError: true,

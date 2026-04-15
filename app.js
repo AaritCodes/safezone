@@ -797,6 +797,15 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
   const safeAreaName = escapeJsString(areaInfo.name || 'Selected location');
   const crimeSourceLabel = riskData ? formatIncidentSourceLabel(riskData.sources && riskData.sources.crime) : 'Unavailable';
   const accidentSourceLabel = riskData ? formatIncidentSourceLabel(riskData.sources && riskData.sources.accidents) : 'Unavailable';
+  const riskReliability = riskData && Number.isFinite(Number(riskData.reliabilityScore))
+    ? Math.round(Number(riskData.reliabilityScore))
+    : null;
+  const crimeQuality = riskData && riskData.dataQuality && Number.isFinite(Number(riskData.dataQuality.crime))
+    ? Math.round(Number(riskData.dataQuality.crime))
+    : null;
+  const accidentQuality = riskData && riskData.dataQuality && Number.isFinite(Number(riskData.dataQuality.accidents))
+    ? Math.round(Number(riskData.dataQuality.accidents))
+    : null;
   const usesProxyRisk = Boolean(riskData && riskData.sources && (
     String(riskData.sources.crime || '').includes('proxy') ||
     String(riskData.sources.accidents || '').includes('proxy')
@@ -867,6 +876,7 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
         <div style="font-size: 11px; color: var(--text-muted); line-height: 1.5;">
           Confidence: ${escapeHtml(riskData.confidence || 'low')} • Crime source: ${escapeHtml(crimeSourceLabel)} • Accident source: ${escapeHtml(accidentSourceLabel)}
         </div>
+        ${riskReliability !== null ? `<div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Estimated data reliability: ${riskReliability}%${crimeQuality !== null ? ` • Crime quality ${crimeQuality}%` : ''}${accidentQuality !== null ? ` • Accident quality ${accidentQuality}%` : ''}</div>` : ''}
         ${usesProxyRisk ? '<div style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">Using civic proxy signals for areas without official open crime APIs.</div>' : ''}
       </div>
     ` : ''}

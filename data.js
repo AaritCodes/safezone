@@ -1975,6 +1975,7 @@ function calculateRouteOptimizationScore(candidate, stats, mode, options = {}) {
   const distanceNorm = Number(candidate.distance || 1) / minDistance;
   const congestionNorm = clampRouteMetric(Number(candidate.congestion.score || 0) / 100, 0, 1);
   const riskPenaltyBase = options && options.riskData ? Number(options.riskData.penalty || 0) : 6;
+  const edgeAiScore = clampRouteMetric(Number(options && options.edgeAiScore ? options.edgeAiScore : 0), 0, 100);
 
   const hotspotExposure = Number(candidate.congestion.hotspotExposure || 0);
   const nearHotspots = Number(candidate.congestion.nearHotspots || 0);
@@ -1995,6 +1996,10 @@ function calculateRouteOptimizationScore(candidate, stats, mode, options = {}) {
     riskPenaltyBase * (mode === 'safest' ? 1.25 : 0.8) +
     congestionSafetyPenalty;
 
+  if (edgeAiScore > 0) {
+    safetyPenaltyRaw += edgeAiScore * (mode === 'safest' ? 0.42 : 0.22);
+  }
+
   if (mode === 'safest') {
     safetyPenaltyRaw += hotspotExposure * 20;
     safetyPenaltyRaw += Math.max(0, nearHotspots - 1) * 3.2;
@@ -2009,7 +2014,7 @@ function calculateRouteOptimizationScore(candidate, stats, mode, options = {}) {
   }
 
   const safetyPenalty = clampRouteMetric(safetyPenaltyRaw, 0, 100);
-  const safetyPriorityScore = Number((hotspotExposure * 100 + nearHotspots * 6 + congestionSafetyPenalty).toFixed(2));
+  const safetyPriorityScore = Number((hotspotExposure * 100 + nearHotspots * 6 + congestionSafetyPenalty + (edgeAiScore * 0.8)).toFixed(2));
   const safetyNorm = safetyPenalty / 100;
 
   const optimizationScore =
@@ -2021,7 +2026,8 @@ function calculateRouteOptimizationScore(candidate, stats, mode, options = {}) {
   return {
     optimizationScore: Number(optimizationScore.toFixed(4)),
     safetyPenalty: Math.round(safetyPenalty),
-    safetyPriorityScore
+    safetyPriorityScore,
+    edgeAiScore: Math.round(edgeAiScore)
   };
 }
 

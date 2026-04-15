@@ -1566,6 +1566,61 @@ function getRouteModeLabel(mode) {
   return ROUTE_MODE_LABELS[key] || ROUTE_MODE_LABELS.balanced;
 }
 
+function getEdgeAISignal() {
+  if (typeof EdgeAI === 'undefined' || typeof EdgeAI.isActive !== 'function') {
+    return { active: false, anomalyScore: 0 };
+  }
+
+  const active = Boolean(EdgeAI.isActive());
+  const anomalyScore = active && typeof EdgeAI.getAnomalyScore === 'function'
+    ? Number(EdgeAI.getAnomalyScore())
+    : 0;
+
+  return {
+    active,
+    anomalyScore: Number.isFinite(anomalyScore) ? Math.max(0, anomalyScore) : 0
+  };
+}
+
+function getRouteMobilityInsight(route, congestion, mode, edgeAiSignal = { active: false, anomalyScore: 0 }) {
+  const routeMode = getRouteModeLabel(mode);
+  const level = getCongestionClass(congestion && congestion.level);
+  const score = Number.isFinite(congestion && congestion.score) ? Math.round(congestion.score) : 50;
+  const edgeScore = Number.isFinite(edgeAiSignal.anomalyScore) ? Math.round(edgeAiSignal.anomalyScore) : 0;
+  const isSafer = level === 'low' || routeMode === 'Safest' || (route && Number(route.safetyPenalty || 0) <= 18);
+  const headline = isSafer ? 'Safer route selected' : 'Route balanced for time and distance';
+  const detailParts = [];
+
+  if (level === 'severe') {
+    detailParts.push('Traffic is expected to be heavy along this path.');
+  } else if (level === 'high') {
+    detailParts.push('This path is likely to slow down during the trip.');
+  } else {
+    detailParts.push('Traffic pressure looks manageable for this route.');
+  }
+
+  if (edgeAiSignal.active && edgeScore > 0) {
+    detailParts.push(`Edge AI signal is active with a ${edgeScore}/100 anomaly score.`);
+  }
+
+  const factorList = [];
+  if (Array.isArray(congestion && congestion.factors)) {
+    congestion.factors.slice(0, 3).forEach((factor) => factorList.push(factor));
+  }
+
+  if (edgeAiSignal.active) {
+    factorList.push(`Edge AI anomaly bias: ${edgeScore}/100`);
+  }
+
+  return {
+    headline,
+    detail: detailParts.join(' '),
+    label: `${routeMode} · ${score}/100 congestion`,
+    tone: isSafer ? 'safe' : 'alert',
+    factors: factorList
+  };
+}
+
 function getCongestionClass(level) {
   const key = String(level || 'moderate').toLowerCase();
   if (key === 'low' || key === 'high' || key === 'severe') return key;
@@ -1729,6 +1784,8 @@ function renderDirectionsPanel(route, destinationLabel) {
   }
 
   const activeCongestion = activeCandidate.congestion || { level: 'moderate', score: 50, delaySeconds: 0, etaSeconds: activeCandidate.duration };
+  const edgeAiSignal = getEdgeAISignal();
+  const mobilityInsight = getRouteMobilityInsight(activeCandidate, activeCongestion, route.optimizationMode || getSelectedRouteMode(), edgeAiSignal);
   const delaySeconds = Number.isFinite(activeCongestion.delaySeconds) ? Math.max(0, activeCongestion.delaySeconds) : 0;
   const etaSeconds = Number.isFinite(activeCongestion.etaSeconds)
     ? Math.max(activeCandidate.duration || 0, activeCongestion.etaSeconds)
@@ -1773,6 +1830,10 @@ function renderDirectionsPanel(route, destinationLabel) {
     `;
   }).join('');
 
+  const insightTagsMarkup = (mobilityInsight.factors || []).map((factor) => `
+    <span class="route-insight-tag">${escapeHtml(factor)}</span>
+  `).join('');
+
   content.innerHTML = `
     <div class="directions-summary">
       <div class="directions-destination">📍 ${escapeHtml(destinationLabel)}</div>
@@ -1781,6 +1842,15 @@ function renderDirectionsPanel(route, destinationLabel) {
       <div class="directions-prediction">
         <span class="congestion-pill ${getCongestionClass(activeCongestion.level)}">${escapeHtml(getCongestionLabel(activeCongestion))}</span>
         <span>Predicted delay ${formatDuration(delaySeconds)} • ETA ${formatDuration(etaSeconds)}</span>
+      </div>
+      <div class="route-insight-card route-insight-${mobilityInsight.tone}">
+        <div class="route-insight-head">
+          <span class="route-insight-title">Mobility Insight</span>
+          <span class="route-insight-badge">${escapeHtml(mobilityInsight.label)}</span>
+        </div>
+        <div class="route-insight-summary">${escapeHtml(mobilityInsight.headline)}</div>
+        <div class="route-insight-detail">${escapeHtml(mobilityInsight.detail)}</div>
+        <div class="route-insight-tags">${insightTagsMarkup || '<span class="route-insight-tag">No additional risk factors detected</span>'}</div>
       </div>
       <div class="route-options">${optionCardsMarkup}</div>
       <div class="directions-actions">
@@ -1869,10 +1939,13 @@ async function startDirectionsTo(lat, lng, label = 'Destination') {
   try {
     const origin = await getCurrentLocation();
     const routeMode = getSelectedRouteMode();
+    const edgeAiSignal = getEdgeAISignal();
     const route = await fetchRouteDirections(origin.lat, origin.lng, lat, lng, 'driving', {
       mode: routeMode,
       hour: currentHour,
-      riskData: lastRiskData
+      riskData: lastRiskData,
+      edgeAiScore: edgeAiSignal.anomalyScore,
+      edgeAiActive: edgeAiSignal.active
     });
 
     activeRoute = route;
@@ -2172,6 +2245,14 @@ document.addEventListener('DOMContentLoaded', () => {
   if (typeof EdgeAI !== 'undefined') {
     EdgeAI.subscribe(() => {
       refreshSelectedSidebar();
+    });
+  }
+
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js').catch((err) => {
+        console.warn('Service worker registration failed:', err);
+      });
     });
   }
 });

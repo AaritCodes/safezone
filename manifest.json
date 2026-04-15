@@ -1,0 +1,17 @@
+{
+  "name": "SafeZone",
+  "short_name": "SafeZone",
+  "description": "Real-time area safety monitoring with route optimization and Edge AI signals.",
+  "start_url": "/safezone/",
+  "scope": "/safezone/",
+  "display": "standalone",
+  "background_color": "#0a0e17",
+  "theme_color": "#0a0e17",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

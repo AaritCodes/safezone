@@ -3,6 +3,7 @@
 // ============================================================
 
 let map, heatLayer, selectedMarker, routeLayer;
+let routeAlternativeLayers = [];
 let emergencyLayerGroup, cameraLayerGroup, propertiesLayerGroup, riskLayerGroup;
 let currentHour = new Date().getHours();
 let layerState = { heatmap: true, cameras: true, emergency: true, properties: true, risk: true };
@@ -1542,6 +1543,68 @@ function closeDirectionsPanel() {
   stopVoiceNavigation();
 }
 
+const ROUTE_MODE_LABELS = {
+  balanced: 'Balanced',
+  fastest: 'Fastest',
+  safest: 'Safest',
+  'least-congested': 'Low Traffic'
+};
+
+function getSelectedRouteMode() {
+  const select = document.getElementById('routeModeSelect');
+  const value = select ? String(select.value || 'balanced').trim().toLowerCase() : 'balanced';
+
+  if (value === 'fastest' || value === 'safest' || value === 'least-congested') {
+    return value;
+  }
+
+  return 'balanced';
+}
+
+function getRouteModeLabel(mode) {
+  const key = String(mode || 'balanced').trim().toLowerCase();
+  return ROUTE_MODE_LABELS[key] || ROUTE_MODE_LABELS.balanced;
+}
+
+function getCongestionClass(level) {
+  const key = String(level || 'moderate').toLowerCase();
+  if (key === 'low' || key === 'high' || key === 'severe') return key;
+  return 'moderate';
+}
+
+function getCongestionLabel(congestion) {
+  if (!congestion || typeof congestion !== 'object') return 'Moderate congestion';
+
+  const level = getCongestionClass(congestion.level);
+  const levelLabel = level.charAt(0).toUpperCase() + level.slice(1);
+  const score = Number.isFinite(congestion.score) ? Math.round(congestion.score) : 50;
+  return `${levelLabel} congestion (${score}/100)`;
+}
+
+function clearRouteDrawing() {
+  routeAlternativeLayers.forEach((layer) => {
+    if (layer && map && map.hasLayer(layer)) {
+      map.removeLayer(layer);
+    }
+  });
+
+  routeAlternativeLayers = [];
+  routeLayer = null;
+}
+
+function getActiveRouteAlternative(route) {
+  if (!route || !Array.isArray(route.alternatives) || route.alternatives.length === 0) {
+    return null;
+  }
+
+  if (route.selectedRouteId) {
+    const selected = route.alternatives.find(candidate => candidate.id === route.selectedRouteId);
+    if (selected) return selected;
+  }
+
+  return route.alternatives[0];
+}
+
 function getCurrentLocation() {
   const mapCenterFallback = {
     lat: currentMapCenter[0],
@@ -1647,7 +1710,31 @@ function renderDirectionsPanel(route, destinationLabel) {
   const content = document.getElementById('directionsContent');
   if (!content) return;
 
-  const stepsMarkup = route.steps.slice(0, 20).map((step, idx) => `
+  const alternatives = Array.isArray(route.alternatives) && route.alternatives.length > 0
+    ? route.alternatives
+    : [{
+      id: 'route_primary',
+      label: 'Primary route',
+      distance: route.distance,
+      duration: route.duration,
+      path: route.path,
+      steps: route.steps,
+      congestion: route.congestion || { level: 'moderate', score: 50, delaySeconds: 0, etaSeconds: route.duration, confidence: 'low' }
+    }];
+
+  const activeCandidate = getActiveRouteAlternative({ ...route, alternatives });
+  if (!activeCandidate) {
+    content.innerHTML = '<p class="directions-empty">No route candidates are available right now.</p>';
+    return;
+  }
+
+  const activeCongestion = activeCandidate.congestion || { level: 'moderate', score: 50, delaySeconds: 0, etaSeconds: activeCandidate.duration };
+  const delaySeconds = Number.isFinite(activeCongestion.delaySeconds) ? Math.max(0, activeCongestion.delaySeconds) : 0;
+  const etaSeconds = Number.isFinite(activeCongestion.etaSeconds)
+    ? Math.max(activeCandidate.duration || 0, activeCongestion.etaSeconds)
+    : (activeCandidate.duration || 0);
+
+  const stepsMarkup = (Array.isArray(activeCandidate.steps) ? activeCandidate.steps : []).slice(0, 20).map((step, idx) => `
     <div class="direction-step" id="route-step-${idx}">
       <div class="direction-step-index">${idx + 1}</div>
       <div class="direction-step-text">
@@ -1657,10 +1744,45 @@ function renderDirectionsPanel(route, destinationLabel) {
     </div>
   `).join('');
 
+  const optionCardsMarkup = alternatives.map((candidate) => {
+    const candidateCongestion = candidate.congestion || { level: 'moderate', score: 50, delaySeconds: 0, etaSeconds: candidate.duration };
+    const candidateDelay = Number.isFinite(candidateCongestion.delaySeconds) ? Math.max(0, candidateCongestion.delaySeconds) : 0;
+    const candidateEta = Number.isFinite(candidateCongestion.etaSeconds)
+      ? Math.max(candidate.duration || 0, candidateCongestion.etaSeconds)
+      : (candidate.duration || 0);
+    const isActive = candidate.id === activeCandidate.id;
+    const recommended = candidate.isRecommended ? '<span class="route-reco">Best</span>' : '';
+    const scoreText = Number.isFinite(candidate.optimizationScore)
+      ? `Opt score ${candidate.optimizationScore.toFixed(2)}`
+      : '';
+
+    return `
+      <button class="route-option ${isActive ? 'active' : ''}" onclick="selectRouteAlternative('${escapeJsString(candidate.id)}')" aria-label="Use ${escapeHtml(candidate.label)}">
+        <div class="route-option-header">
+          <span class="route-option-title">${escapeHtml(candidate.label || 'Route')}</span>
+          ${recommended}
+        </div>
+        <div class="route-option-meta">
+          ${formatDuration(candidate.duration)} base • ${formatDuration(candidateDelay)} delay • ETA ${formatDuration(candidateEta)}
+        </div>
+        <div class="route-option-meta">
+          <span class="congestion-pill ${getCongestionClass(candidateCongestion.level)}">${escapeHtml(getCongestionLabel(candidateCongestion))}</span>
+          ${scoreText ? `<span class="route-option-score">${escapeHtml(scoreText)}</span>` : ''}
+        </div>
+      </button>
+    `;
+  }).join('');
+
   content.innerHTML = `
     <div class="directions-summary">
       <div class="directions-destination">📍 ${escapeHtml(destinationLabel)}</div>
-      <div class="directions-stats">${formatDistance(route.distance)} • ${formatDuration(route.duration)} • ${route.steps.length} steps</div>
+      <div class="directions-stats">${formatDistance(activeCandidate.distance)} • ${formatDuration(activeCandidate.duration)} • ${(activeCandidate.steps || []).length} steps</div>
+      <div class="directions-mode">Mode: ${escapeHtml(getRouteModeLabel(route.optimizationMode || getSelectedRouteMode()))}</div>
+      <div class="directions-prediction">
+        <span class="congestion-pill ${getCongestionClass(activeCongestion.level)}">${escapeHtml(getCongestionLabel(activeCongestion))}</span>
+        <span>Predicted delay ${formatDuration(delaySeconds)} • ETA ${formatDuration(etaSeconds)}</span>
+      </div>
+      <div class="route-options">${optionCardsMarkup}</div>
       <div class="directions-actions">
         <button class="search-btn" onclick="speakRouteOverview()">🔊 Speak Overview</button>
         <button class="search-btn directions-btn" onclick="startVoiceNavigation()">🎙 Start Voice Guidance</button>
@@ -1671,17 +1793,74 @@ function renderDirectionsPanel(route, destinationLabel) {
   `;
 }
 
-function drawRoute(routePath) {
-  if (routeLayer) map.removeLayer(routeLayer);
+function drawRoute(routeData) {
+  clearRouteDrawing();
 
-  routeLayer = L.polyline(routePath, {
-    color: '#38bdf8',
-    weight: 5,
-    opacity: 0.9,
-    lineJoin: 'round'
-  }).addTo(map);
+  const alternatives = Array.isArray(routeData && routeData.alternatives) && routeData.alternatives.length > 0
+    ? routeData.alternatives
+    : [{ id: 'route_primary', path: routeData && routeData.path ? routeData.path : [], congestion: routeData ? routeData.congestion : null }];
+  const selectedRouteId = routeData && routeData.selectedRouteId
+    ? routeData.selectedRouteId
+    : (alternatives[0] && alternatives[0].id ? alternatives[0].id : 'route_primary');
 
-  map.fitBounds(routeLayer.getBounds(), { padding: [60, 60] });
+  alternatives.forEach((candidate) => {
+    if (!Array.isArray(candidate.path) || candidate.path.length < 2) return;
+
+    const isActive = candidate.id === selectedRouteId;
+    const congestionLevel = getCongestionClass(candidate.congestion && candidate.congestion.level);
+    const inactiveColor = congestionLevel === 'severe'
+      ? '#ef4444'
+      : congestionLevel === 'high'
+        ? '#f97316'
+        : congestionLevel === 'low'
+          ? '#22c55e'
+          : '#eab308';
+
+    const polyline = L.polyline(candidate.path, {
+      color: isActive ? '#38bdf8' : inactiveColor,
+      weight: isActive ? 6 : 4,
+      opacity: isActive ? 0.95 : 0.46,
+      lineJoin: 'round',
+      dashArray: isActive ? null : '8 10',
+      interactive: false
+    }).addTo(map);
+
+    routeAlternativeLayers.push(polyline);
+    if (isActive) routeLayer = polyline;
+  });
+
+  const focusLayer = routeLayer || routeAlternativeLayers[0];
+  if (focusLayer) {
+    map.fitBounds(focusLayer.getBounds(), { padding: [60, 60] });
+  }
+}
+
+function selectRouteAlternative(routeId) {
+  if (!activeRoute || !Array.isArray(activeRoute.alternatives) || activeRoute.alternatives.length === 0) {
+    return;
+  }
+
+  const nextRoute = activeRoute.alternatives.find(candidate => candidate.id === routeId);
+  if (!nextRoute) return;
+
+  stopVoiceNavigation(false);
+
+  activeRoute.selectedRouteId = nextRoute.id;
+  activeRoute.selectedIndex = activeRoute.alternatives.findIndex(candidate => candidate.id === nextRoute.id);
+  activeRoute.distance = nextRoute.distance;
+  activeRoute.duration = nextRoute.duration;
+  activeRoute.path = nextRoute.path;
+  activeRoute.steps = nextRoute.steps;
+  activeRoute.congestion = nextRoute.congestion;
+
+  routeStepIndex = 0;
+  drawRoute(activeRoute);
+
+  if (routeDestination) {
+    renderDirectionsPanel(activeRoute, routeDestination.label);
+  }
+
+  showNotification(`Switched to ${nextRoute.label || 'selected route'} (${getCongestionLabel(nextRoute.congestion)})`, 'info', 2300);
 }
 
 async function startDirectionsTo(lat, lng, label = 'Destination') {
@@ -1689,22 +1868,27 @@ async function startDirectionsTo(lat, lng, label = 'Destination') {
 
   try {
     const origin = await getCurrentLocation();
-    const route = await fetchRouteDirections(origin.lat, origin.lng, lat, lng, 'driving');
+    const routeMode = getSelectedRouteMode();
+    const route = await fetchRouteDirections(origin.lat, origin.lng, lat, lng, 'driving', {
+      mode: routeMode,
+      hour: currentHour,
+      riskData: lastRiskData
+    });
 
     activeRoute = route;
     routeDestination = { lat, lng, label };
     routeStepIndex = 0;
 
-    drawRoute(route.path);
+    drawRoute(route);
     renderDirectionsPanel(route, label);
     openDirectionsPanel();
 
     if (route.error) {
       showNotification('⚠️ Live routing unavailable. Showing direct fallback line.', 'warning', 4000);
-    } else if (route.source === 'google-directions') {
-      showNotification(`🧭 Route ready via Google to ${label}`, 'success', 2500);
+    } else if (route.source === 'google-directions-sdk') {
+      showNotification(`🧭 ${getRouteModeLabel(route.optimizationMode)} route ready via Google to ${label}`, 'success', 2600);
     } else {
-      showNotification(`🧭 Route ready to ${label}`, 'success', 2500);
+      showNotification(`🧭 ${getRouteModeLabel(route.optimizationMode)} route ready to ${label}`, 'success', 2600);
     }
   } catch (err) {
     console.error('Directions error:', err);
@@ -1764,7 +1948,14 @@ function speakRouteOverview() {
     return;
   }
 
-  const summary = `Route to ${routeDestination.label}. Total distance ${formatDistance(activeRoute.distance)}. Estimated time ${formatDuration(activeRoute.duration)}.`;
+  const congestion = activeRoute.congestion || {};
+  const level = getCongestionClass(congestion.level);
+  const levelLabel = level.charAt(0).toUpperCase() + level.slice(1);
+  const etaSeconds = Number.isFinite(congestion.etaSeconds)
+    ? Math.max(activeRoute.duration || 0, congestion.etaSeconds)
+    : activeRoute.duration;
+
+  const summary = `Route to ${routeDestination.label}. Distance ${formatDistance(activeRoute.distance)}. Base travel time ${formatDuration(activeRoute.duration)}. Predicted traffic ${levelLabel}. Estimated arrival in ${formatDuration(etaSeconds)}.`;
   speakText(summary, true);
 }
 

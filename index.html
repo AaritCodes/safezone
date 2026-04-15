@@ -39,6 +39,12 @@
         onkeydown="onSearchKeydown(event)"
         autocomplete="off"
       />
+      <select id="routeModeSelect" class="route-mode-select" aria-label="Route optimization mode">
+        <option value="balanced" selected>Balanced</option>
+        <option value="fastest">Fastest</option>
+        <option value="safest">Safest</option>
+        <option value="least-congested">Low Traffic</option>
+      </select>
       <button id="voiceSearchBtn" class="voice-btn" onclick="toggleVoiceSearch()" aria-label="Search by voice">🎤</button>
       <button class="search-btn" onclick="searchLocation()">Search</button>
       <button class="search-btn directions-btn" onclick="startDirectionsFromInput()" aria-label="Get directions to searched location">Route</button>

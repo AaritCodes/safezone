@@ -388,40 +388,24 @@ async function fetchRouteDirectionsWithGoogle(fromLat, fromLng, toLat, toLng, pr
       origin: new google.maps.LatLng(fromLat, fromLng),
       destination: new google.maps.LatLng(toLat, toLng),
       travelMode: mode,
-      provideRouteAlternatives: false
+      provideRouteAlternatives: true
     }, (response, status) => {
       if (status !== 'OK' || !response || !response.routes || response.routes.length === 0) {
         return resolve(null);
       }
 
-      const route = response.routes[0];
-      const leg = route.legs && route.legs.length > 0 ? route.legs[0] : null;
-      if (!leg) return resolve(null);
+      const routes = response.routes
+        .slice(0, 3)
+        .map((route, index) => mapGoogleDirectionsRouteCandidate(route, fromLat, fromLng, index))
+        .filter(route => Array.isArray(route.path) && route.path.length > 1);
 
-      const path = route.overview_path.map(p => [p.lat(), p.lng()]);
-
-      const steps = (Array.isArray(leg.steps) ? leg.steps : []).map((step, i) => {
-        const instruction = stripHtmlTags(step.instructions || 'Continue');
-        const distance = step.distance && step.distance.value ? step.distance.value : 0;
-        const duration = step.duration && step.duration.value ? step.duration.value : 0;
-        
-        return {
-          index: i,
-          instruction,
-          voiceInstruction: `${instruction}. Continue for ${formatDistance(distance)}.`,
-          distance: Math.round(distance),
-          duration: Math.round(duration),
-          lat: step.end_location.lat(),
-          lng: step.end_location.lng()
-        };
-      });
+      if (!routes.length) {
+        return resolve(null);
+      }
 
       resolve({
         source: 'google-directions-sdk',
-        distance: Math.round(leg.distance && leg.distance.value ? leg.distance.value : 0),
-        duration: Math.round(leg.duration && leg.duration.value ? leg.duration.value : 0),
-        path: path.length > 1 ? path : [[fromLat, fromLng], [toLat, toLng]],
-        steps
+        alternatives: routes
       });
     });
   });
@@ -1678,7 +1662,459 @@ function generateRiskFactors(hour, services, cameras, areaInfo, riskData = null)
   return { risks, features };
 }
 
-// ── Routing Engine (Turn-by-Turn via OSRM) ───────────────────
+// ── Routing Engine (Turn-by-Turn + Optimization + Congestion Prediction) ───
+const ROUTE_OPTIMIZATION_MODES = new Set(['balanced', 'fastest', 'safest', 'least-congested']);
+
+function normalizeRouteOptimizationMode(mode) {
+  const value = String(mode || 'balanced').trim().toLowerCase();
+  return ROUTE_OPTIMIZATION_MODES.has(value) ? value : 'balanced';
+}
+
+function clampRouteMetric(value, min, max) {
+  if (!Number.isFinite(value)) return min;
+  return Math.max(min, Math.min(max, value));
+}
+
+function sampleRoutePoints(path, maxPoints = 18) {
+  const points = Array.isArray(path) ? path : [];
+  if (points.length <= maxPoints) return points;
+
+  const sampled = [];
+  const stride = (points.length - 1) / (maxPoints - 1);
+
+  for (let i = 0; i < maxPoints; i++) {
+    const index = Math.min(points.length - 1, Math.round(i * stride));
+    sampled.push(points[index]);
+  }
+
+  return sampled;
+}
+
+function estimateRouteHotspotExposure(path, riskData = null) {
+  if (!riskData || !Array.isArray(riskData.hotspots) || riskData.hotspots.length === 0) {
+    return { nearHotspots: 0, hotspotExposure: 0 };
+  }
+
+  const sampledPath = sampleRoutePoints(path, 18);
+  if (!sampledPath.length) {
+    return { nearHotspots: 0, hotspotExposure: 0 };
+  }
+
+  let nearHotspots = 0;
+
+  for (const hotspot of riskData.hotspots.slice(0, 40)) {
+    const hotspotLat = Number(hotspot.lat);
+    const hotspotLng = Number(hotspot.lng);
+    if (!Number.isFinite(hotspotLat) || !Number.isFinite(hotspotLng)) continue;
+
+    let minDistance = Infinity;
+
+    for (const point of sampledPath) {
+      const pointLat = Number(point[0]);
+      const pointLng = Number(point[1]);
+      if (!Number.isFinite(pointLat) || !Number.isFinite(pointLng)) continue;
+
+      const distance = getDistance(pointLat, pointLng, hotspotLat, hotspotLng);
+      if (distance < minDistance) minDistance = distance;
+      if (minDistance <= 220) break;
+    }
+
+    if (minDistance <= 220) nearHotspots += 1;
+  }
+
+  const baseline = Math.max(1, Math.min(riskData.hotspots.length, 20));
+  const hotspotExposure = clampRouteMetric(nearHotspots / baseline, 0, 1);
+
+  return { nearHotspots, hotspotExposure };
+}
+
+function getCongestionTimeProfile(hour) {
+  const normalizedHour = ((Math.round(hour) % 24) + 24) % 24;
+
+  if ((normalizedHour >= 7 && normalizedHour <= 10) || (normalizedHour >= 17 && normalizedHour <= 20)) {
+    return { base: 56, label: 'peak-hours' };
+  }
+
+  if (normalizedHour === 6 || normalizedHour === 11 || normalizedHour === 16 || normalizedHour === 21) {
+    return { base: 42, label: 'shoulder-hours' };
+  }
+
+  if (normalizedHour >= 12 && normalizedHour <= 15) {
+    return { base: 34, label: 'daytime' };
+  }
+
+  if (normalizedHour >= 22 || normalizedHour <= 4) {
+    return { base: 18, label: 'night' };
+  }
+
+  return { base: 28, label: 'off-peak' };
+}
+
+function predictRouteCongestion(routeCandidate, profile = 'driving', options = {}) {
+  const hour = Number.isFinite(options.hour) ? Number(options.hour) : new Date().getHours();
+  const riskData = options && typeof options === 'object' ? options.riskData : null;
+  const timeProfile = getCongestionTimeProfile(hour);
+
+  const distanceKm = Math.max(0, Number(routeCandidate.distance || 0) / 1000);
+  const stepCount = Array.isArray(routeCandidate.steps) ? routeCandidate.steps.length : 0;
+
+  const { nearHotspots, hotspotExposure } = estimateRouteHotspotExposure(routeCandidate.path, riskData);
+
+  const routePath = Array.isArray(routeCandidate.path) ? routeCandidate.path : [];
+  const firstPoint = routePath.length ? routePath[0] : [0, 0];
+  const lastPoint = routePath.length ? routePath[routePath.length - 1] : [0, 0];
+
+  const seed = pseudoRandomFromCoords(
+    Number(firstPoint[0] || 0) + Number(lastPoint[0] || 0),
+    Number(firstPoint[1] || 0) + Number(lastPoint[1] || 0),
+    (Number(routeCandidate.distance || 0) / 1000) + (Number(routeCandidate.duration || 0) / 60)
+  );
+  const deterministicNoise = (seed - 0.5) * 8;
+
+  const riskPenalty = riskData
+    ? clampRouteMetric(
+      Number(riskData.accidentHotspots || 0) * 1.1 +
+      Number(riskData.conflictPoints || 0) * 0.7 +
+      Number(riskData.penalty || 0) * 0.45,
+      0,
+      22
+    )
+    : 0;
+
+  let score = timeProfile.base;
+  score += clampRouteMetric(distanceKm * 2.2, 2, 20);
+  score += clampRouteMetric(stepCount * 0.6, 1, 18);
+  score += hotspotExposure * 28;
+  score += riskPenalty;
+  score += deterministicNoise;
+
+  const congestionScore = Math.round(clampRouteMetric(score, 8, 97));
+
+  let level = 'moderate';
+  if (congestionScore < 35) level = 'low';
+  else if (congestionScore < 60) level = 'moderate';
+  else if (congestionScore < 80) level = 'high';
+  else level = 'severe';
+
+  const delayMultiplier = profile === 'walking' ? 0.18 : 0.52;
+  const delaySeconds = Math.round((Number(routeCandidate.duration || 0) * delayMultiplier) * (congestionScore / 100));
+  const etaSeconds = Math.max(0, Math.round(Number(routeCandidate.duration || 0) + delaySeconds));
+
+  let confidence = 'medium';
+  if (!riskData) {
+    confidence = 'low';
+  } else if (String(riskData.confidence || '').toLowerCase() === 'high') {
+    confidence = 'high';
+  } else if (String(riskData.confidence || '').toLowerCase() === 'low') {
+    confidence = 'low';
+  }
+
+  const factors = [];
+  factors.push(timeProfile.label === 'peak-hours' ? 'Peak-hour traffic pressure' : 'Normal traffic window');
+  if (nearHotspots > 0) factors.push(`${nearHotspots} incident hotspots near this path`);
+  if (stepCount > 14) factors.push('High number of turns/intersections');
+
+  return {
+    score: congestionScore,
+    level,
+    delaySeconds: Math.max(0, delaySeconds),
+    etaSeconds,
+    confidence,
+    nearHotspots,
+    hotspotExposure,
+    factors
+  };
+}
+
+function mapGoogleDirectionsRouteCandidate(route, fallbackLat, fallbackLng, index = 0) {
+  const leg = route && Array.isArray(route.legs) && route.legs.length > 0
+    ? route.legs[0]
+    : null;
+
+  const endLat = leg && leg.end_location
+    ? Number(typeof leg.end_location.lat === 'function' ? leg.end_location.lat() : leg.end_location.lat)
+    : Number(fallbackLat);
+  const endLng = leg && leg.end_location
+    ? Number(typeof leg.end_location.lng === 'function' ? leg.end_location.lng() : leg.end_location.lng)
+    : Number(fallbackLng);
+
+  const path = Array.isArray(route && route.overview_path)
+    ? route.overview_path
+      .map(point => [
+        Number(typeof point.lat === 'function' ? point.lat() : point.lat),
+        Number(typeof point.lng === 'function' ? point.lng() : point.lng)
+      ])
+      .filter(point => Number.isFinite(point[0]) && Number.isFinite(point[1]))
+    : [];
+
+  const steps = (leg && Array.isArray(leg.steps) ? leg.steps : []).map((step, i) => {
+    const instruction = stripHtmlTags(step.instructions || 'Continue');
+    const distance = step.distance && step.distance.value ? Number(step.distance.value) : 0;
+    const duration = step.duration && step.duration.value ? Number(step.duration.value) : 0;
+    const stepLat = step.end_location
+      ? Number(typeof step.end_location.lat === 'function' ? step.end_location.lat() : step.end_location.lat)
+      : endLat;
+    const stepLng = step.end_location
+      ? Number(typeof step.end_location.lng === 'function' ? step.end_location.lng() : step.end_location.lng)
+      : endLng;
+
+    return {
+      index: i,
+      instruction,
+      voiceInstruction: `${instruction}. Continue for ${formatDistance(Math.round(distance))}.`,
+      distance: Math.round(distance),
+      duration: Math.round(duration),
+      lat: Number.isFinite(stepLat) ? stepLat : endLat,
+      lng: Number.isFinite(stepLng) ? stepLng : endLng
+    };
+  });
+
+  if (!steps.length) {
+    const fallbackDistance = Math.round(leg && leg.distance && leg.distance.value ? Number(leg.distance.value) : 0);
+    const fallbackDuration = Math.round(leg && leg.duration && leg.duration.value ? Number(leg.duration.value) : 0);
+
+    steps.push({
+      index: 0,
+      instruction: 'Continue to destination',
+      voiceInstruction: `Continue to destination for ${formatDistance(fallbackDistance)}.`,
+      distance: fallbackDistance,
+      duration: fallbackDuration,
+      lat: Number.isFinite(endLat) ? endLat : Number(fallbackLat),
+      lng: Number.isFinite(endLng) ? endLng : Number(fallbackLng)
+    });
+  }
+
+  return {
+    id: `google_route_${index + 1}`,
+    label: `Route ${String.fromCharCode(65 + (index % 26))}`,
+    source: 'google-directions-sdk',
+    distance: Math.round(leg && leg.distance && leg.distance.value ? Number(leg.distance.value) : 0),
+    duration: Math.round(leg && leg.duration && leg.duration.value ? Number(leg.duration.value) : 0),
+    path: path.length > 1 ? path : [[Number(fallbackLat), Number(fallbackLng)], [Number(endLat), Number(endLng)]],
+    steps
+  };
+}
+
+function mapOsrmRouteCandidate(route, fallbackLat, fallbackLng, index = 0) {
+  const leg = route && Array.isArray(route.legs) && route.legs[0]
+    ? route.legs[0]
+    : { steps: [] };
+
+  const path = route && route.geometry && Array.isArray(route.geometry.coordinates)
+    ? route.geometry.coordinates
+      .map(pair => [Number(pair[1]), Number(pair[0])])
+      .filter(point => Number.isFinite(point[0]) && Number.isFinite(point[1]))
+    : [];
+
+  const endPoint = path.length ? path[path.length - 1] : [Number(fallbackLat), Number(fallbackLng)];
+
+  const steps = (Array.isArray(leg.steps) ? leg.steps : []).map((step, i) => {
+    const maneuverLoc = step.maneuver && Array.isArray(step.maneuver.location)
+      ? step.maneuver.location
+      : [Number(fallbackLng), Number(fallbackLat)];
+    const instruction = formatRouteInstruction(step);
+
+    return {
+      index: i,
+      instruction,
+      voiceInstruction: `${instruction}. Continue for ${formatDistance(Math.round(step.distance || 0))}.`,
+      distance: Math.round(step.distance || 0),
+      duration: Math.round(step.duration || 0),
+      lat: Number(maneuverLoc[1]),
+      lng: Number(maneuverLoc[0])
+    };
+  });
+
+  if (!steps.length) {
+    const fallbackDistance = Math.round(Number(route && route.distance ? route.distance : 0));
+    const fallbackDuration = Math.round(Number(route && route.duration ? route.duration : 0));
+
+    steps.push({
+      index: 0,
+      instruction: 'Continue to destination',
+      voiceInstruction: `Continue to destination for ${formatDistance(fallbackDistance)}.`,
+      distance: fallbackDistance,
+      duration: fallbackDuration,
+      lat: Number(endPoint[0]),
+      lng: Number(endPoint[1])
+    });
+  }
+
+  return {
+    id: `osrm_route_${index + 1}`,
+    label: `Route ${String.fromCharCode(65 + (index % 26))}`,
+    source: 'osrm',
+    distance: Math.round(Number(route && route.distance ? route.distance : 0)),
+    duration: Math.round(Number(route && route.duration ? route.duration : 0)),
+    path: path.length > 1 ? path : [[Number(fallbackLat), Number(fallbackLng)], [Number(endPoint[0]), Number(endPoint[1])]],
+    steps
+  };
+}
+
+function getRouteOptimizationWeights(mode) {
+  if (mode === 'fastest') {
+    return { eta: 0.62, distance: 0.20, congestion: 0.13, safety: 0.05 };
+  }
+
+  if (mode === 'safest') {
+    return { eta: 0.08, distance: 0.04, congestion: 0.18, safety: 0.70 };
+  }
+
+  if (mode === 'least-congested') {
+    return { eta: 0.21, distance: 0.09, congestion: 0.54, safety: 0.16 };
+  }
+
+  return { eta: 0.42, distance: 0.13, congestion: 0.27, safety: 0.18 };
+}
+
+function calculateRouteOptimizationScore(candidate, stats, mode, options = {}) {
+  const weights = getRouteOptimizationWeights(mode);
+  const minEta = Math.max(1, Number(stats.minEtaSeconds || 1));
+  const minDistance = Math.max(1, Number(stats.minDistanceMeters || 1));
+  const etaNorm = Number(candidate.congestion.etaSeconds || candidate.duration || 1) / minEta;
+  const distanceNorm = Number(candidate.distance || 1) / minDistance;
+  const congestionNorm = clampRouteMetric(Number(candidate.congestion.score || 0) / 100, 0, 1);
+  const riskPenaltyBase = options && options.riskData ? Number(options.riskData.penalty || 0) : 6;
+
+  const hotspotExposure = Number(candidate.congestion.hotspotExposure || 0);
+  const nearHotspots = Number(candidate.congestion.nearHotspots || 0);
+  const confidence = String(candidate.congestion.confidence || 'medium').toLowerCase();
+  const congestionLevel = String(candidate.congestion.level || 'moderate').toLowerCase();
+
+  const congestionSafetyPenalty = congestionLevel === 'severe'
+    ? 30
+    : congestionLevel === 'high'
+      ? 18
+      : congestionLevel === 'moderate'
+        ? 8
+        : 2;
+
+  let safetyPenaltyRaw =
+    hotspotExposure * 82 +
+    nearHotspots * 4.6 +
+    riskPenaltyBase * (mode === 'safest' ? 1.25 : 0.8) +
+    congestionSafetyPenalty;
+
+  if (mode === 'safest') {
+    safetyPenaltyRaw += hotspotExposure * 20;
+    safetyPenaltyRaw += Math.max(0, nearHotspots - 1) * 3.2;
+    if (confidence === 'low') {
+      // Prefer conservative route choices when public risk confidence is low.
+      safetyPenaltyRaw += 6;
+    }
+  } else if (mode === 'fastest') {
+    safetyPenaltyRaw *= 0.65;
+  } else if (mode === 'least-congested') {
+    safetyPenaltyRaw *= 0.9;
+  }
+
+  const safetyPenalty = clampRouteMetric(safetyPenaltyRaw, 0, 100);
+  const safetyPriorityScore = Number((hotspotExposure * 100 + nearHotspots * 6 + congestionSafetyPenalty).toFixed(2));
+  const safetyNorm = safetyPenalty / 100;
+
+  const optimizationScore =
+    (etaNorm * weights.eta) +
+    (distanceNorm * weights.distance) +
+    (congestionNorm * weights.congestion) +
+    (safetyNorm * weights.safety);
+
+  return {
+    optimizationScore: Number(optimizationScore.toFixed(4)),
+    safetyPenalty: Math.round(safetyPenalty),
+    safetyPriorityScore
+  };
+}
+
+function optimizeRouteAlternatives(alternatives, mode = 'balanced', profile = 'driving', options = {}) {
+  const normalizedMode = normalizeRouteOptimizationMode(mode);
+  const candidates = Array.isArray(alternatives) ? alternatives : [];
+
+  if (!candidates.length) {
+    return {
+      mode: normalizedMode,
+      selectedRouteId: '',
+      alternatives: []
+    };
+  }
+
+  const enriched = candidates.map((candidate, index) => {
+    const id = String(candidate.id || `route_${index + 1}`);
+    const label = String(candidate.label || `Route ${String.fromCharCode(65 + (index % 26))}`);
+    const congestion = predictRouteCongestion(candidate, profile, options);
+
+    return {
+      ...candidate,
+      id,
+      label,
+      congestion
+    };
+  });
+
+  const stats = {
+    minEtaSeconds: Math.min(...enriched.map(candidate => Number(candidate.congestion.etaSeconds || candidate.duration || Infinity))),
+    minDistanceMeters: Math.min(...enriched.map(candidate => Number(candidate.distance || Infinity)))
+  };
+
+  const scored = enriched.map((candidate) => {
+    const scoreOutput = calculateRouteOptimizationScore(candidate, stats, normalizedMode, options);
+    return {
+      ...candidate,
+      optimizationScore: scoreOutput.optimizationScore,
+      safetyPenalty: scoreOutput.safetyPenalty,
+      safetyPriorityScore: scoreOutput.safetyPriorityScore
+    };
+  });
+
+  scored.sort((a, b) => {
+    if (normalizedMode === 'safest') {
+      const safetyPenaltyDelta = Number(a.safetyPenalty || 0) - Number(b.safetyPenalty || 0);
+      if (Math.abs(safetyPenaltyDelta) >= 4) {
+        return safetyPenaltyDelta;
+      }
+
+      const nearHotspotDelta = Number(a.congestion && a.congestion.nearHotspots || 0) - Number(b.congestion && b.congestion.nearHotspots || 0);
+      if (nearHotspotDelta !== 0) {
+        return nearHotspotDelta;
+      }
+    }
+
+    return Number(a.optimizationScore || Infinity) - Number(b.optimizationScore || Infinity);
+  });
+  scored.forEach((candidate, index) => {
+    candidate.isRecommended = index === 0;
+  });
+
+  return {
+    mode: normalizedMode,
+    selectedRouteId: scored[0].id,
+    alternatives: scored
+  };
+}
+
+function buildRouteBundle(source, alternatives, mode, profile, options = {}) {
+  const optimized = optimizeRouteAlternatives(alternatives, mode, profile, options);
+  if (!optimized.alternatives.length) return null;
+
+  const selectedIndex = optimized.alternatives.findIndex(route => route.id === optimized.selectedRouteId);
+  const selectedRoute = selectedIndex >= 0
+    ? optimized.alternatives[selectedIndex]
+    : optimized.alternatives[0];
+
+  return {
+    source,
+    optimizationMode: optimized.mode,
+    selectedRouteId: selectedRoute.id,
+    selectedIndex: selectedIndex >= 0 ? selectedIndex : 0,
+    alternatives: optimized.alternatives,
+    distance: selectedRoute.distance,
+    duration: selectedRoute.duration,
+    etaSeconds: selectedRoute.congestion ? selectedRoute.congestion.etaSeconds : selectedRoute.duration,
+    path: selectedRoute.path,
+    steps: selectedRoute.steps,
+    congestion: selectedRoute.congestion
+  };
+}
+
 function formatRouteInstruction(step) {
   const type = step.maneuver && step.maneuver.type ? step.maneuver.type : 'continue';
   const modifier = step.maneuver && step.maneuver.modifier ? step.maneuver.modifier : '';
@@ -1697,12 +2133,24 @@ function formatRouteInstruction(step) {
   return `Continue ${modifier || 'ahead'}${road}`.trim();
 }
 
-async function fetchRouteDirections(fromLat, fromLng, toLat, toLng, profile = 'driving') {
+async function fetchRouteDirections(fromLat, fromLng, toLat, toLng, profile = 'driving', options = {}) {
+  const optimizationMode = normalizeRouteOptimizationMode(options.mode);
+
   if (hasGoogleApiKey()) {
     try {
       const googleRoute = await fetchRouteDirectionsWithGoogle(fromLat, fromLng, toLat, toLng, profile);
-      if (googleRoute) {
-        return googleRoute;
+      if (googleRoute && Array.isArray(googleRoute.alternatives) && googleRoute.alternatives.length > 0) {
+        const optimizedGoogle = buildRouteBundle(
+          googleRoute.source || 'google-directions-sdk',
+          googleRoute.alternatives,
+          optimizationMode,
+          profile,
+          options
+        );
+
+        if (optimizedGoogle) {
+          return optimizedGoogle;
+        }
       }
     } catch (err) {
       console.warn('Google directions failed, falling back to OSRM:', err);
@@ -1711,7 +2159,7 @@ async function fetchRouteDirections(fromLat, fromLng, toLat, toLng, profile = 'd
   }
 
   const routeProfile = profile === 'walking' ? 'foot' : 'driving';
-  const url = `https://router.project-osrm.org/route/v1/${routeProfile}/${fromLng},${fromLat};${toLng},${toLat}?overview=full&geometries=geojson&steps=true&alternatives=false`;
+  const url = `https://router.project-osrm.org/route/v1/${routeProfile}/${fromLng},${fromLat};${toLng},${toLat}?overview=full&geometries=geojson&steps=true&alternatives=true`;
 
   try {
     const response = await fetch(url);
@@ -1724,39 +2172,31 @@ async function fetchRouteDirections(fromLat, fromLng, toLat, toLng, profile = 'd
       throw new Error('No route returned');
     }
 
-    const route = data.routes[0];
-    const leg = route.legs && route.legs[0] ? route.legs[0] : { steps: [] };
+    const alternatives = data.routes
+      .slice(0, 3)
+      .map((route, index) => mapOsrmRouteCandidate(route, fromLat, fromLng, index))
+      .filter(route => Array.isArray(route.path) && route.path.length > 1);
 
-    const path = route.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
-    const steps = (leg.steps || []).map((step, i) => {
-      const maneuverLoc = step.maneuver && step.maneuver.location ? step.maneuver.location : [fromLng, fromLat];
-      const instruction = formatRouteInstruction(step);
+    if (!alternatives.length) {
+      throw new Error('No usable route alternatives were returned');
+    }
 
-      return {
-        index: i,
-        instruction,
-        voiceInstruction: `${instruction}. Continue for ${formatDistance(Math.round(step.distance || 0))}.`,
-        distance: Math.round(step.distance || 0),
-        duration: Math.round(step.duration || 0),
-        lat: maneuverLoc[1],
-        lng: maneuverLoc[0]
-      };
-    });
+    const optimizedOsrm = buildRouteBundle('osrm', alternatives, optimizationMode, profile, options);
+    if (optimizedOsrm) {
+      return optimizedOsrm;
+    }
 
-    return {
-      source: 'osrm',
-      distance: Math.round(route.distance),
-      duration: Math.round(route.duration),
-      path,
-      steps
-    };
+    throw new Error('Route optimization returned no candidates');
   } catch (err) {
     console.warn('Route fetch failed, using fallback path:', err);
     const directDistance = Math.round(getDistance(fromLat, fromLng, toLat, toLng));
-    return {
+    const fallbackDuration = Math.round(directDistance / 13);
+    const fallbackCandidate = {
+      id: 'fallback_route_1',
+      label: 'Direct fallback',
       source: 'fallback',
       distance: directDistance,
-      duration: Math.round(directDistance / 13),
+      duration: fallbackDuration,
       path: [[fromLat, fromLng], [toLat, toLng]],
       steps: [
         {
@@ -1764,11 +2204,29 @@ async function fetchRouteDirections(fromLat, fromLng, toLat, toLng, profile = 'd
           instruction: 'Routing service unavailable. Follow direct path to destination.',
           voiceInstruction: 'Routing service is unavailable. Follow the highlighted direct path to destination.',
           distance: directDistance,
-          duration: Math.round(directDistance / 13),
+          duration: fallbackDuration,
           lat: toLat,
           lng: toLng
         }
-      ],
+      ]
+    };
+
+    const fallbackBundle = buildRouteBundle('fallback', [fallbackCandidate], optimizationMode, profile, options);
+    if (fallbackBundle) {
+      fallbackBundle.error = 'API_FAILED';
+      return fallbackBundle;
+    }
+
+    return {
+      source: 'fallback',
+      optimizationMode,
+      selectedRouteId: fallbackCandidate.id,
+      selectedIndex: 0,
+      alternatives: [fallbackCandidate],
+      distance: directDistance,
+      duration: fallbackDuration,
+      path: fallbackCandidate.path,
+      steps: fallbackCandidate.steps,
       error: 'API_FAILED'
     };
   }

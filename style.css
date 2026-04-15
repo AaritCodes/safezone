@@ -164,6 +164,32 @@ html, body {
   color: var(--text-muted);
 }
 
+.route-mode-select {
+  height: 38px;
+  min-width: 118px;
+  border-radius: 16px;
+  border: 1px solid var(--border-glass);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+  padding: 0 10px;
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 700;
+  outline: none;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.route-mode-select:focus {
+  border-color: var(--accent-light);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.route-mode-select option {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
 .search-btn {
   background: var(--accent);
   border: none;
@@ -352,11 +378,132 @@ html, body {
   color: var(--text-muted);
 }
 
+.directions-mode {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.directions-prediction {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.congestion-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 9px;
+  border: 1px solid transparent;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.congestion-pill.low {
+  background: rgba(34, 197, 94, 0.15);
+  border-color: rgba(34, 197, 94, 0.4);
+  color: #86efac;
+}
+
+.congestion-pill.moderate {
+  background: rgba(234, 179, 8, 0.14);
+  border-color: rgba(234, 179, 8, 0.45);
+  color: #fde68a;
+}
+
+.congestion-pill.high {
+  background: rgba(249, 115, 22, 0.14);
+  border-color: rgba(249, 115, 22, 0.42);
+  color: #fdba74;
+}
+
+.congestion-pill.severe {
+  background: rgba(239, 68, 68, 0.16);
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #fca5a5;
+}
+
 .directions-actions {
   margin-top: 10px;
   display: grid;
   grid-template-columns: 1fr;
   gap: 8px;
+}
+
+.route-options {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.route-option {
+  width: 100%;
+  text-align: left;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-glass);
+  background: rgba(255, 255, 255, 0.03);
+  padding: 10px;
+  cursor: pointer;
+  color: var(--text-primary);
+  transition: var(--transition);
+}
+
+.route-option:hover {
+  border-color: rgba(125, 211, 252, 0.45);
+  background: rgba(14, 165, 233, 0.1);
+}
+
+.route-option.active {
+  border-color: rgba(56, 189, 248, 0.8);
+  background: rgba(14, 165, 233, 0.18);
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.35);
+}
+
+.route-option-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.route-option-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.route-reco {
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.16);
+  border: 1px solid rgba(34, 197, 94, 0.4);
+}
+
+.route-option-meta {
+  margin-top: 5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.route-option-score {
+  color: var(--text-secondary);
 }
 
 .directions-steps {
@@ -1321,6 +1468,22 @@ html, body {
   .search-container {
     top: 70px;
   }
+
+  .search-bar {
+    gap: 8px;
+    padding: 6px 8px 6px 14px;
+  }
+
+  .route-mode-select {
+    min-width: 96px;
+    height: 36px;
+    font-size: 11px;
+    padding: 0 8px;
+  }
+
+  .search-btn {
+    padding: 9px 14px;
+  }
   
   .brand {
     top: 16px;
@@ -1526,6 +1689,8 @@ html, body {
 .layer-btn:focus,
 .search-btn:focus,
 .voice-btn:focus,
+.route-mode-select:focus,
+.route-option:focus,
 .close-btn:focus,
 .emergency-btn:focus,
 .favorite-btn:focus {

@@ -108,10 +108,10 @@
   </div>
 
   <!-- Time Control -->
-  <div class="time-control">
+  <div class="time-control" role="region" aria-label="Time analysis controls">
     <div class="time-header">
       <span class="time-label">Time Analysis</span>
-      <span class="time-value" id="timeDisplay">--</span>
+      <span class="time-value" id="timeDisplay" aria-live="polite" aria-label="Current selected hour">--</span>
     </div>
     <input 
       type="range" 
@@ -121,8 +121,10 @@
       max="23" 
       value="12" 
       oninput="onTimeChange(this.value)"
+      aria-label="Adjust time of day from 0 to 23 hours"
+      aria-describedby="timeDescription"
     />
-    <div class="time-marks">
+    <div class="time-marks" id="timeDescription" aria-hidden="true">
       <span>12 AM</span>
       <span>6 AM</span>
       <span>12 PM</span>
@@ -156,22 +158,38 @@
     </button>
   </div>
 
-  <div id="contactsModal" class="contacts-modal" role="dialog" aria-modal="true" aria-label="Emergency contacts manager">
+  <div id="contactsModal" class="contacts-modal" role="dialog" aria-modal="true" aria-labelledby="contactsModalTitle">
     <div class="contacts-card">
       <div class="contacts-header">
-        <h3>Emergency Contacts</h3>
+        <h3 id="contactsModalTitle">Emergency Contacts</h3>
         <button class="close-btn" onclick="closeEmergencyContacts()" aria-label="Close emergency contacts">✕</button>
       </div>
 
-      <form class="contacts-form" onsubmit="saveEmergencyContact(event)">
-        <input id="contactNameInput" type="text" placeholder="Contact name" maxlength="40" required />
-        <input id="contactPhoneInput" type="tel" placeholder="Phone number" maxlength="20" required />
-        <button type="submit" class="search-btn">Add Contact</button>
+      <form class="contacts-form" onsubmit="saveEmergencyContact(event)" aria-label="Add new emergency contact form">
+        <input 
+          id="contactNameInput" 
+          type="text" 
+          placeholder="Contact name" 
+          maxlength="40" 
+          required 
+          aria-label="Enter emergency contact name"
+          aria-required="true"
+        />
+        <input 
+          id="contactPhoneInput" 
+          type="tel" 
+          placeholder="Phone number" 
+          maxlength="20" 
+          required 
+          aria-label="Enter emergency contact phone number"
+          aria-required="true"
+        />
+        <button type="submit" class="search-btn" aria-label="Add emergency contact">Add Contact</button>
       </form>
 
-      <div id="contactsList" class="contacts-list"></div>
+      <div id="contactsList" class="contacts-list" aria-label="List of saved emergency contacts" aria-live="polite"></div>
 
-      <button class="sos-btn" onclick="triggerSOSCall()" aria-label="Call primary emergency contact">
+      <button class="sos-btn" onclick="triggerSOSCall()" aria-label="Call primary emergency contact immediately">
         🆘 SOS Call Primary Contact
       </button>
     </div>

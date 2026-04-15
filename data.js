@@ -5,8 +5,25 @@
 // Default center: New Delhi, India
 const MAP_CENTER = [28.6139, 77.2090];
 const MAP_ZOOM = 13;
-const GOOGLE_API_KEY = 'AIzaSyCYFwU8dtaM2mj0l-_Q1EGgpV2Ab_LjRz4';
+const GOOGLE_API_KEY = '';
 const GOOGLE_API_KEY_META_NAME = 'safezone-google-api-key';
+
+function normalizeGoogleApiKey(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+
+  // Ignore placeholder values that are commonly left in templates.
+  if (/^your[_\s-]?google[_\s-]?api[_\s-]?key$/i.test(raw)) {
+    return '';
+  }
+
+  // Google API keys are URL-safe tokens; reject unexpected characters.
+  if (!/^[A-Za-z0-9_-]{20,}$/.test(raw)) {
+    return '';
+  }
+
+  return raw;
+}
 
 function readGoogleApiKeyFromMetaTag() {
   if (typeof document === 'undefined' || typeof document.querySelector !== 'function') {
@@ -17,24 +34,19 @@ function readGoogleApiKeyFromMetaTag() {
   if (!meta) return '';
 
   const content = String(meta.getAttribute('content') || '').trim();
-  if (!content) return '';
-
-  if (/^your[_\s-]?google[_\s-]?api[_\s-]?key$/i.test(content)) {
-    return '';
-  }
-
-  return content;
+  return normalizeGoogleApiKey(content);
 }
 
 function getGoogleApiKey() {
-  if (typeof window !== 'undefined' && typeof window.SAFEZONE_GOOGLE_API_KEY === 'string' && window.SAFEZONE_GOOGLE_API_KEY.trim()) {
-    return window.SAFEZONE_GOOGLE_API_KEY.trim();
+  if (typeof window !== 'undefined' && typeof window.SAFEZONE_GOOGLE_API_KEY === 'string') {
+    const windowKey = normalizeGoogleApiKey(window.SAFEZONE_GOOGLE_API_KEY);
+    if (windowKey) return windowKey;
   }
 
   const metaKey = readGoogleApiKeyFromMetaTag();
   if (metaKey) return metaKey;
 
-  return GOOGLE_API_KEY;
+  return normalizeGoogleApiKey(GOOGLE_API_KEY);
 }
 
 function hasGoogleApiKey() {
@@ -1410,14 +1422,7 @@ async function fetchRegionalCrimeProxySignals(lat, lng, radius = 2200) {
 }
 
 function loadRiskModel() {
-  try {
-    const raw = localStorage.getItem(RISK_MODEL_STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch (err) {
-    console.warn('Risk model cache load failed:', err);
-  }
-
-  return {
+  const defaultModel = {
     samples: 0,
     avgObserved: 8,
     avgTheft: 1,
@@ -1425,9 +1430,26 @@ function loadRiskModel() {
     avgAccident: 2,
     updatedAt: Date.now()
   };
+
+  if (typeof localStorage === 'undefined') {
+    return defaultModel;
+  }
+
+  try {
+    const raw = localStorage.getItem(RISK_MODEL_STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (err) {
+    console.warn('Risk model cache load failed:', err);
+  }
+
+  return defaultModel;
 }
 
 function saveRiskModel(model) {
+  if (typeof localStorage === 'undefined') {
+    return;
+  }
+
   try {
     localStorage.setItem(RISK_MODEL_STORAGE_KEY, JSON.stringify(model));
   } catch (err) {
@@ -2844,4 +2866,20 @@ function formatDuration(seconds) {
   const rem = mins % 60;
   if (rem === 0) return `${hrs} hr`;
   return `${hrs} hr ${rem} min`;
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    getDistance,
+    getDistanceDecayWeight,
+    normalizeAndRankHotspots,
+    getCrimeSignalReliability,
+    trainRiskModel,
+    calculateSafetyScore,
+    normalizeRouteOptimizationMode,
+    predictRouteCongestion,
+    optimizeRouteAlternatives,
+    getGoogleApiKey,
+    hasGoogleApiKey
+  };
 }

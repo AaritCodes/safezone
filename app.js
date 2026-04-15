@@ -19,8 +19,134 @@ const SCAN_SOFT_DEADLINE_MS = 6000;
 const SCAN_CALL_TIMEOUT_MS = 9000;
 let activeScanRequestId = 0;
 
-let favoriteLocations = JSON.parse(localStorage.getItem('safezoneFavorites') || '[]');
-let emergencyContacts = JSON.parse(localStorage.getItem('safezoneEmergencyContacts') || '[]');
+const FAVORITES_STORAGE_KEY = 'safezoneFavorites';
+const CONTACTS_STORAGE_KEY = 'safezoneEmergencyContacts';
+const MAX_FAVORITES = 40;
+const MAX_EMERGENCY_CONTACTS = 5;
+
+function canUseLocalStorage() {
+  try {
+    return typeof localStorage !== 'undefined';
+  } catch (err) {
+    return false;
+  }
+}
+
+function normalizeDisplayText(value, maxLen = 80) {
+  return String(value || '')
+    .replace(/[<>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLen);
+}
+
+function sanitizeIdentifier(value, maxLen = 40) {
+  return String(value || '')
+    .replace(/[^a-zA-Z0-9_-]/g, '')
+    .slice(0, maxLen);
+}
+
+function safeMapCoordinate(value, min, max, fallback = 0) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < min || numeric > max) {
+    return fallback;
+  }
+
+  return Number(numeric.toFixed(6));
+}
+
+function parseStoredArray(key) {
+  if (!canUseLocalStorage()) return [];
+
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    console.warn(`Failed to parse storage key ${key}:`, err);
+    return [];
+  }
+}
+
+function persistStoredArray(key, value) {
+  if (!canUseLocalStorage()) return;
+
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (err) {
+    console.warn(`Failed to persist storage key ${key}:`, err);
+  }
+}
+
+function sanitizeFavoriteEntry(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+
+  const lat = Number(entry.lat);
+  const lng = Number(entry.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+
+  const name = normalizeDisplayText(entry.name, 80) || 'Saved location';
+  const ts = Number(entry.timestamp);
+
+  return {
+    lat,
+    lng,
+    name,
+    timestamp: Number.isFinite(ts) && ts > 0 ? ts : Date.now()
+  };
+}
+
+function sanitizeEmergencyContactEntry(entry, fallbackId) {
+  if (!entry || typeof entry !== 'object') return null;
+
+  const name = normalizeDisplayText(entry.name, 40);
+  const phone = sanitizePhoneNumber(entry.phone);
+  const id = sanitizeIdentifier(entry.id, 40) || fallbackId;
+
+  if (!name || !isValidPhoneNumber(phone)) return null;
+
+  return {
+    id,
+    name,
+    phone
+  };
+}
+
+function loadFavoriteLocations() {
+  const parsed = parseStoredArray(FAVORITES_STORAGE_KEY);
+  const sanitized = [];
+
+  parsed.forEach((entry) => {
+    const normalized = sanitizeFavoriteEntry(entry);
+    if (!normalized) return;
+    sanitized.push(normalized);
+  });
+
+  return sanitized.slice(0, MAX_FAVORITES);
+}
+
+function loadEmergencyContacts() {
+  const parsed = parseStoredArray(CONTACTS_STORAGE_KEY);
+  const sanitized = [];
+  const seen = new Set();
+
+  parsed.forEach((entry, index) => {
+    const normalized = sanitizeEmergencyContactEntry(entry, `contact_${index + 1}`);
+    if (!normalized) return;
+
+    const dedupeKey = normalized.phone;
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+    sanitized.push(normalized);
+  });
+
+  return sanitized.slice(0, MAX_EMERGENCY_CONTACTS);
+}
+
+let favoriteLocations = loadFavoriteLocations();
+let emergencyContacts = loadEmergencyContacts();
 
 let activeRoute = null;
 let routeDestination = null;
@@ -52,7 +178,16 @@ function escapeJsString(value) {
 }
 
 function sanitizePhoneNumber(phone) {
-  return String(phone || '').replace(/[^\d+]/g, '');
+  const raw = String(phone || '').trim();
+  const compact = raw.replace(/[^\d+]/g, '');
+  const normalizedDigits = compact.replace(/\+/g, '');
+  const hasLeadingPlus = compact.startsWith('+');
+
+  return `${hasLeadingPlus ? '+' : ''}${normalizedDigits}`;
+}
+
+function isValidPhoneNumber(phone) {
+  return /^\+?\d{6,20}$/.test(String(phone || ''));
 }
 
 function formatIncidentSourceLabel(source) {
@@ -811,9 +946,11 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
     String(riskData.sources.crime || '').includes('proxy') ||
     String(riskData.sources.accidents || '').includes('proxy')
   ));
+  const safeLat = safeMapCoordinate(lat, -90, 90);
+  const safeLng = safeMapCoordinate(lng, -180, 180);
 
   const isFavorite = favoriteLocations.some(fav =>
-    Math.abs(fav.lat - lat) < 0.0001 && Math.abs(fav.lng - lng) < 0.0001
+    Math.abs(fav.lat - safeLat) < 0.0001 && Math.abs(fav.lng - safeLng) < 0.0001
   );
 
   document.getElementById('sidebarContent').innerHTML = `
@@ -846,10 +983,10 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
       <div class="zone-name">${escapeHtml(areaInfo.name)} • ${formatTime(currentHour)}</div>
       <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">${escapeHtml(areaInfo.area || '')}</div>
 
-      <button class="favorite-btn ${isFavorite ? 'active' : ''}" onclick="toggleFavorite(${lat}, ${lng}, '${safeAreaName}')" aria-label="${isFavorite ? 'Remove' : 'Save'} location ${escapeHtml(areaInfo.name)}">
+      <button class="favorite-btn ${isFavorite ? 'active' : ''}" onclick="toggleFavorite(${safeLat}, ${safeLng}, '${safeAreaName}')" aria-label="${isFavorite ? 'Remove' : 'Save'} location ${escapeHtml(areaInfo.name)}">
         ${isFavorite ? '⭐ Saved' : '☆ Save Location'}
       </button>
-      <button class="route-now-btn" onclick="startDirectionsTo(${lat}, ${lng}, '${safeAreaName}')" aria-label="Get turn-by-turn directions to ${escapeHtml(areaInfo.name)}">
+      <button class="route-now-btn" onclick="startDirectionsTo(${safeLat}, ${safeLng}, '${safeAreaName}')" aria-label="Get turn-by-turn directions to ${escapeHtml(areaInfo.name)}">
         🧭 Directions Here
       </button>
     </div>
@@ -887,7 +1024,7 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
       <div style="font-size: 12px; color: var(--text-secondary); padding: 10px 12px; background: rgba(255,255,255,0.03); border-radius: 8px; border: 1px solid var(--border-glass); line-height: 1.6;">
         <div style="font-weight:600; color:var(--text-primary); margin-bottom:4px;">${escapeHtml(areaInfo.name)}</div>
         <div>${escapeHtml(areaInfo.fullAddress || '')}</div>
-        <div style="color: var(--text-muted); margin-top: 4px; font-size: 11px;">${lat.toFixed(5)}, ${lng.toFixed(5)}</div>
+        <div style="color: var(--text-muted); margin-top: 4px; font-size: 11px;">${safeLat.toFixed(5)}, ${safeLng.toFixed(5)}</div>
       </div>
     </div>
 
@@ -971,7 +1108,7 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
       </div>
       ${cameraArray.length === 0 ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:12px;">No cameras detected in this area</p>' : ''}
       ${cameraArray.slice(0, 5).map(c => `
-        <div class="service-card" onclick="map.flyTo([${c.lat}, ${c.lng}], 17)" tabindex="0" role="button" aria-label="View ${escapeHtml(c.name)} on map">
+        <div class="service-card" onclick="map.flyTo([${safeMapCoordinate(c.lat, -90, 90)}, ${safeMapCoordinate(c.lng, -180, 180)}], 17)" tabindex="0" role="button" aria-label="View ${escapeHtml(c.name)} on map">
           <div class="service-icon" style="background: rgba(34,197,94,0.15); font-size: 18px;">📹</div>
           <div class="service-info">
             <div class="service-name">${escapeHtml(c.name)}</div>
@@ -986,7 +1123,7 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
       <div class="section-title"><span class="icon">🚔</span> Nearest Police Stations</div>
       ${services.police.length === 0 ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:12px;">No police stations found within 3 km</p>' : ''}
       ${services.police.slice(0, 5).map(p => `
-        <div class="service-card" onclick="map.flyTo([${p.lat}, ${p.lng}], 16)" tabindex="0" role="button" aria-label="View ${escapeHtml(p.name)} on map">
+        <div class="service-card" onclick="map.flyTo([${safeMapCoordinate(p.lat, -90, 90)}, ${safeMapCoordinate(p.lng, -180, 180)}], 16)" tabindex="0" role="button" aria-label="View ${escapeHtml(p.name)} on map">
           <div class="service-icon police">🚔</div>
           <div class="service-info">
             <div class="service-name">${escapeHtml(p.name)}</div>
@@ -1001,7 +1138,7 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
       <div class="section-title"><span class="icon">🏥</span> Nearest Hospitals</div>
       ${services.hospital.length === 0 ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:12px;">No hospitals found within 3 km</p>' : ''}
       ${services.hospital.slice(0, 5).map(h => `
-        <div class="service-card" onclick="map.flyTo([${h.lat}, ${h.lng}], 16)" tabindex="0" role="button" aria-label="View ${escapeHtml(h.name)} on map">
+        <div class="service-card" onclick="map.flyTo([${safeMapCoordinate(h.lat, -90, 90)}, ${safeMapCoordinate(h.lng, -180, 180)}], 16)" tabindex="0" role="button" aria-label="View ${escapeHtml(h.name)} on map">
           <div class="service-icon hospital">🏥</div>
           <div class="service-info">
             <div class="service-name">${escapeHtml(h.name)}</div>
@@ -1016,7 +1153,7 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
       <div class="section-title"><span class="icon">🚒</span> Nearest Fire Stations</div>
       ${services.fire.length === 0 ? '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:12px;">No fire stations found within 3 km</p>' : ''}
       ${services.fire.slice(0, 5).map(f => `
-        <div class="service-card" onclick="map.flyTo([${f.lat}, ${f.lng}], 16)" tabindex="0" role="button" aria-label="View ${escapeHtml(f.name)} on map">
+        <div class="service-card" onclick="map.flyTo([${safeMapCoordinate(f.lat, -90, 90)}, ${safeMapCoordinate(f.lng, -180, 180)}], 16)" tabindex="0" role="button" aria-label="View ${escapeHtml(f.name)} on map">
           <div class="service-icon fire">🚒</div>
           <div class="service-info">
             <div class="service-name">${escapeHtml(f.name)}</div>
@@ -1069,20 +1206,42 @@ function updateTimeDisplay() {
 }
 
 // ── Favorite Locations ────────────────────────────────────────
+function persistFavoriteLocations() {
+  persistStoredArray(FAVORITES_STORAGE_KEY, favoriteLocations);
+}
+
 function toggleFavorite(lat, lng, name) {
+  const safeLat = Number(lat);
+  const safeLng = Number(lng);
+
+  if (!Number.isFinite(safeLat) || !Number.isFinite(safeLng) || safeLat < -90 || safeLat > 90 || safeLng < -180 || safeLng > 180) {
+    showNotification('Unable to save this location. Coordinates are invalid.', 'error', 2600);
+    return;
+  }
+
   const index = favoriteLocations.findIndex(fav =>
-    Math.abs(fav.lat - lat) < 0.0001 && Math.abs(fav.lng - lng) < 0.0001
+    Math.abs(fav.lat - safeLat) < 0.0001 && Math.abs(fav.lng - safeLng) < 0.0001
   );
 
   if (index > -1) {
     favoriteLocations.splice(index, 1);
     showNotification('📍 Location removed from favorites', 'info', 2000);
   } else {
-    favoriteLocations.push({ lat, lng, name, timestamp: Date.now() });
+    if (favoriteLocations.length >= MAX_FAVORITES) {
+      showNotification(`You can store up to ${MAX_FAVORITES} favorite locations.`, 'warning', 2800);
+      return;
+    }
+
+    favoriteLocations.push({
+      lat: safeLat,
+      lng: safeLng,
+      name: normalizeDisplayText(name, 80) || 'Saved location',
+      timestamp: Date.now()
+    });
     showNotification('⭐ Location saved to favorites', 'success', 2000);
   }
 
-  localStorage.setItem('safezoneFavorites', JSON.stringify(favoriteLocations));
+  persistFavoriteLocations();
   refreshSelectedSidebar();
 }
 
@@ -2328,7 +2487,7 @@ function stopVoiceNavigation(notify = true) {
 
 // ── Emergency Contacts ────────────────────────────────────────
 function persistEmergencyContacts() {
-  localStorage.setItem('safezoneEmergencyContacts', JSON.stringify(emergencyContacts));
+  persistStoredArray(CONTACTS_STORAGE_KEY, emergencyContacts);
 }
 
 function renderEmergencyContacts() {
@@ -2347,8 +2506,8 @@ function renderEmergencyContacts() {
         <div class="contact-phone">${escapeHtml(contact.phone)}</div>
       </div>
       <div class="contact-actions">
-        <button class="contact-action call" onclick="callEmergencyContact('${contact.id}')" aria-label="Call ${escapeHtml(contact.name)} at ${escapeHtml(contact.phone)}">Call</button>
-        <button class="contact-action remove" onclick="removeEmergencyContact('${contact.id}')" aria-label="Remove ${escapeHtml(contact.name)} from emergency contacts">Remove</button>
+        <button class="contact-action call" onclick="callEmergencyContact('${escapeJsString(contact.id)}')" aria-label="Call ${escapeHtml(contact.name)} at ${escapeHtml(contact.phone)}">Call</button>
+        <button class="contact-action remove" onclick="removeEmergencyContact('${escapeJsString(contact.id)}')" aria-label="Remove ${escapeHtml(contact.name)} from emergency contacts">Remove</button>
       </div>
     </div>
   `).join('');
@@ -2370,21 +2529,26 @@ function saveEmergencyContact(event) {
 
   const nameInput = document.getElementById('contactNameInput');
   const phoneInput = document.getElementById('contactPhoneInput');
-  const name = nameInput.value.trim();
+  const name = normalizeDisplayText(nameInput.value, 40);
   const phone = sanitizePhoneNumber(phoneInput.value.trim());
 
-  if (!name || !phone || phone.length < 6) {
+  if (!name || !isValidPhoneNumber(phone)) {
     showNotification('Enter a valid contact name and phone number.', 'warning', 2500);
     return;
   }
 
-  if (emergencyContacts.length >= 5) {
-    showNotification('You can store up to 5 emergency contacts.', 'warning', 3000);
+  if (emergencyContacts.length >= MAX_EMERGENCY_CONTACTS) {
+    showNotification(`You can store up to ${MAX_EMERGENCY_CONTACTS} emergency contacts.`, 'warning', 3000);
+    return;
+  }
+
+  if (emergencyContacts.some((contact) => sanitizePhoneNumber(contact.phone) === phone)) {
+    showNotification('This phone number is already saved as an emergency contact.', 'warning', 2600);
     return;
   }
 
   emergencyContacts.push({
-    id: Date.now().toString(),
+    id: `contact_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
     name,
     phone
   });
@@ -2408,7 +2572,13 @@ function callEmergencyContact(id) {
   const contact = emergencyContacts.find(c => c.id === id);
   if (!contact) return;
 
-  window.location.href = `tel:${sanitizePhoneNumber(contact.phone)}`;
+  const phone = sanitizePhoneNumber(contact.phone);
+  if (!isValidPhoneNumber(phone)) {
+    showNotification('This contact has an invalid phone number.', 'error', 2200);
+    return;
+  }
+
+  window.location.href = `tel:${phone}`;
 }
 
 function triggerSOSCall() {
@@ -2419,8 +2589,14 @@ function triggerSOSCall() {
   }
 
   const primary = emergencyContacts[0];
+  const phone = sanitizePhoneNumber(primary.phone);
+  if (!isValidPhoneNumber(phone)) {
+    showNotification('Primary contact phone number is invalid.', 'error', 2200);
+    return;
+  }
+
   showNotification(`Calling ${primary.name}...`, 'warning', 2000);
-  window.location.href = `tel:${sanitizePhoneNumber(primary.phone)}`;
+  window.location.href = `tel:${phone}`;
 }
 
 // ── Edge AI UI Logic ──────────────────────────────────────────
@@ -2441,6 +2617,8 @@ async function toggleEdgeAI() {
 document.addEventListener('DOMContentLoaded', () => {
   initMap();
   renderEmergencyContacts();
+  persistFavoriteLocations();
+  persistEmergencyContacts();
 
   const contactsModal = document.getElementById('contactsModal');
   contactsModal.addEventListener('click', (event) => {

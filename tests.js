@@ -1,291 +1,231 @@
 /**
- * SafeZone Risk Accuracy Tests
- * Tests for distance decay, hotspot normalization, and reliability scoring
- * Run with: npm test (requires Jest)
+ * SafeZone Production Tests
+ * These tests validate behavior of the shipped logic in data.js and sw.js.
  */
 
-// Mock distance calculation (from data.js getDistance utility)
-const getDistance = (lat1, lon1, lat2, lon2) => {
-  const R = 6371000; // Earth's radius in meters
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return Math.round(R * c);
-};
+const {
+  getDistanceDecayWeight,
+  normalizeAndRankHotspots,
+  getCrimeSignalReliability,
+  trainRiskModel,
+  calculateSafetyScore,
+  optimizeRouteAlternatives,
+  getGoogleApiKey,
+  hasGoogleApiKey
+} = require('./data.js');
 
-// Distance decay weight function
-const getDistanceDecayWeight = (distanceMeters) => {
-  const MIN_DISTANCE = 180;
-  const MAX_DISTANCE = 2600;
-  const MIN_WEIGHT = 0.14;
+const {
+  CACHE_NAME,
+  isSafeCacheableResponse,
+  isCacheableShellRequest
+} = require('./sw.js');
 
-  if (distanceMeters <= MIN_DISTANCE) return 1.0;
-  if (distanceMeters >= MAX_DISTANCE) return MIN_WEIGHT;
-
-  const normalized = (distanceMeters - MIN_DISTANCE) / (MAX_DISTANCE - MIN_DISTANCE);
-  const exponent = 2.5;
-  return 1.0 - (1.0 - MIN_WEIGHT) * Math.pow(normalized, exponent);
-};
-
-// Hotspot normalization function
-const normalizeAndRankHotspots = (hotspots, limit = 15) => {
-  if (!hotspots || hotspots.length === 0) return [];
-
-  const GRID_SIZE = 0.00045;
-  const cellMap = new Map();
-
-  hotspots.forEach((hotspot) => {
-    const cellX = Math.floor(hotspot.lat / GRID_SIZE);
-    const cellY = Math.floor(hotspot.lng / GRID_SIZE);
-    const cellKey = `${cellX},${cellY}`;
-
-    const severityMap = { dangerous_curve: 2.9, slippery: 2.3, falling_rocks: 3.1, accident: 2.4, traffic_signal: 0.58 };
-    const severity = severityMap[hotspot.type] || 1.0;
-
-    if (!cellMap.has(cellKey) || severity > cellMap.get(cellKey).severity) {
-      cellMap.set(cellKey, { ...hotspot, severity });
-    }
-  });
-
-  return Array.from(cellMap.values())
-    .sort((a, b) => b.severity - a.severity)
-    .slice(0, limit)
-    .map(({ severity, ...rest }) => rest);
-};
-
-// Crime signal reliability function (updated for India Police data)
-const getCrimeSignalReliability = (source, sampleCoveragePercent) => {
-  const coverageWeight = Math.min(sampleCoveragePercent / 100, 1.0);
-
-  switch (source) {
-    case "india-police-data":
-      return 0.72 + 0.20 * coverageWeight;
-    case "india-police-karnataka":
-      return 0.78 + 0.20 * coverageWeight;
-    case "osm-proxy":
-      return 0.42 + 0.36 * coverageWeight;
-    case "model-derived":
-      return 0.28;
-    default:
-      return 0.28;
-  }
-};
-
-// Train risk model with reliability weighting
-const trainRiskModel = (observations, anomalies, reliability) => {
-  const baseWeight = 0.76;
-  const anomalyWeightRange = [1.1, 1.7];
-  const reliabilityWeight = Math.max(0.2, reliability);
-
-  let penalties = [];
-  observations.forEach((obs) => {
-    const penaltyObserved = obs.baseWeight * baseWeight;
-    penalties.push(penaltyObserved);
-  });
-
-  let anomalyPenalties = [];
-  anomalies.forEach((anom) => {
-    const factor = anomalyWeightRange[0] + Math.random() * (anomalyWeightRange[1] - anomalyWeightRange[0]);
-    anomalyPenalties.push(anom.delta * factor);
-  });
-
-  const avgPenalty = penalties.reduce((a, b) => a + b, 0) / (penalties.length || 1);
-  const avgAnomaly = anomalyPenalties.reduce((a, b) => a + b, 0) / (anomalyPenalties.length || 1);
-  const modelPenalty = (avgPenalty + avgAnomaly) * reliabilityWeight;
-
-  return {
-    penalty: modelPenalty,
-    reliabilityPercent: Math.round(reliabilityWeight * 100),
-  };
-};
-
-// ============================================================
-// TEST SUITE
-// ============================================================
-
-describe("SafeZone Risk Accuracy", () => {
-  describe("getDistanceDecayWeight", () => {
-    test("returns 1.0 for distances <= 180m", () => {
-      expect(getDistanceDecayWeight(0)).toBe(1.0);
-      expect(getDistanceDecayWeight(100)).toBe(1.0);
-      expect(getDistanceDecayWeight(180)).toBe(1.0);
-    });
-
-    test("returns 0.14 for distances >= 2600m", () => {
+describe('SafeZone Production Logic', () => {
+  describe('Risk Core: getDistanceDecayWeight', () => {
+    test('returns full weight near source and floor at far distances', () => {
+      expect(getDistanceDecayWeight(0)).toBe(1);
+      expect(getDistanceDecayWeight(180)).toBe(1);
       expect(getDistanceDecayWeight(2600)).toBe(0.14);
-      expect(getDistanceDecayWeight(5000)).toBe(0.14);
+      expect(getDistanceDecayWeight(6400)).toBe(0.14);
     });
 
-    test("returns interpolated weight between 180m and 2600m", () => {
-      const mid = getDistanceDecayWeight(1390); // midpoint
-      expect(mid).toBeGreaterThan(0.14);
-      expect(mid).toBeLessThan(1.0);
-    });
+    test('decreases monotonically from near to far', () => {
+      const near = getDistanceDecayWeight(400);
+      const mid = getDistanceDecayWeight(1200);
+      const far = getDistanceDecayWeight(2200);
 
-    test("weight decreases as distance increases", () => {
-      const near = getDistanceDecayWeight(500);
-      const mid = getDistanceDecayWeight(1390);
-      const far = getDistanceDecayWeight(2400);
       expect(near).toBeGreaterThan(mid);
       expect(mid).toBeGreaterThan(far);
     });
   });
 
-  describe("normalizeAndRankHotspots", () => {
-    test("returns empty array for empty input", () => {
-      expect(normalizeAndRankHotspots([])).toEqual([]);
-      expect(normalizeAndRankHotspots(null)).toEqual([]);
-    });
-
-    test("deduplicates hotspots in same grid cell, keeps highest severity", () => {
+  describe('Risk Core: normalizeAndRankHotspots', () => {
+    test('deduplicates by grid and keeps highest severity candidate', () => {
       const hotspots = [
-        { lat: 48.8566, lng: 2.3522, type: "accident", title: "Spot 1", source: "osm" },
-        { lat: 48.8567, lng: 2.3523, type: "falling_rocks", title: "Spot 2", source: "osm" }, // same cell, higher severity
+        { lat: 12.9716, lng: 77.5946, type: 'theft', title: 'Low', source: 'feed', severity: 1.1 },
+        { lat: 12.9716, lng: 77.5946, type: 'theft', title: 'High', source: 'feed', severity: 2.8 },
+        { lat: 12.9732, lng: 77.5961, type: 'violent', title: 'Separate', source: 'feed', severity: 1.7 }
       ];
-      const result = normalizeAndRankHotspots(hotspots);
-      expect(result.length).toBeLessThanOrEqual(hotspots.length);
+
+      const result = normalizeAndRankHotspots(hotspots, 12.9716, 77.5946, 10);
+      expect(result.length).toBe(2);
+      expect(result[0].title).toBe('High');
     });
 
-    test("ranks hotspots by severity", () => {
-      const hotspots = [
-        { lat: 48.8566, lng: 2.3522, type: "traffic_signal", title: "Mild", source: "osm" }, // 0.58
-        { lat: 48.9566, lng: 2.4522, type: "dangerous_curve", title: "High", source: "osm" }, // 2.9
-        { lat: 48.7566, lng: 2.2522, type: "accident", title: "Medium", source: "osm" }, // 2.4
-      ];
-      const result = normalizeAndRankHotspots(hotspots);
-      expect(result[0].title).toBe("High"); // dangerous_curve (2.9) ranks first
-      expect(result[1].title).toBe("Medium"); // accident (2.4) ranks second
-    });
-
-    test("respects limit parameter", () => {
-      const hotspots = Array.from({ length: 50 }, (_, i) => ({
-        lat: 48.8566 + i * 0.001,
-        lng: 2.3522 + i * 0.001,
-        type: "accident",
-        title: `Spot ${i}`,
-        source: "osm",
+    test('returns bounded list based on limit', () => {
+      const hotspots = Array.from({ length: 30 }, (_, i) => ({
+        lat: 12.8 + i * 0.01,
+        lng: 77.2 + i * 0.01,
+        type: 'accident',
+        title: `Hotspot ${i}`,
+        source: 'feed',
+        severity: 1.2
       }));
-      const result = normalizeAndRankHotspots(hotspots, 15);
-      expect(result.length).toBeLessThanOrEqual(15);
-    });
 
-    test("preserves original hotspot properties after dedup", () => {
-      const hotspots = [{ lat: 48.8566, lng: 2.3522, type: "accident", title: "Test", source: "osm", custom: "data" }];
-      const result = normalizeAndRankHotspots(hotspots);
-      expect(result[0]).toHaveProperty("lat");
-      expect(result[0]).toHaveProperty("lng");
-      expect(result[0]).toHaveProperty("title");
-      expect(result[0]).toHaveProperty("source");
+      const result = normalizeAndRankHotspots(hotspots, 12.9, 77.3, 7);
+      expect(result.length).toBeLessThanOrEqual(7);
     });
   });
 
-  describe("getCrimeSignalReliability", () => {
-    test("returns high reliability for india-police-data with full coverage", () => {
-      const reliability = getCrimeSignalReliability("india-police-data", 100);
-      expect(reliability).toBe(0.92);
+  describe('Risk Core: reliability and model training', () => {
+    test('official police feeds score higher reliability than proxy/model sources', () => {
+      const indiaPolice = getCrimeSignalReliability({ source: 'india-police-data', total: 70, coverage: 1 });
+      const proxy = getCrimeSignalReliability({ source: 'osm-civic-risk-proxy', total: 40, coverage: 1 });
+      const model = getCrimeSignalReliability({ source: 'model-derived-risk-proxy', total: 10, coverage: 0.2 });
+
+      expect(indiaPolice).toBeGreaterThan(proxy);
+      expect(proxy).toBeGreaterThan(model);
     });
 
-    test("returns lower reliability for india-police-data with partial coverage", () => {
-      const low = getCrimeSignalReliability("india-police-data", 50);
-      const high = getCrimeSignalReliability("india-police-data", 100);
-      expect(low).toBeLessThan(high);
-      expect(low).toBeGreaterThan(0.72);
-    });
+    test('trainRiskModel increases penalty with stronger reliability for same signals', () => {
+      const crimeData = { theftCount: 9, violentCount: 3 };
+      const accidentData = { weightedRisk: 4.5, hazardCount: 2, signalCount: 5 };
 
-    test("returns higher reliability for karnataka police data", () => {
-      const reliability = getCrimeSignalReliability("india-police-karnataka", 100);
-      expect(reliability).toBe(0.98);
-      expect(reliability).toBeGreaterThan(getCrimeSignalReliability("india-police-data", 100));
-    });
+      const low = trainRiskModel(crimeData, accidentData, 0.3);
+      const high = trainRiskModel(crimeData, accidentData, 0.9);
 
-    test("returns moderate reliability for osm-proxy", () => {
-      const reliability = getCrimeSignalReliability("osm-proxy", 100);
-      expect(reliability).toBeLessThan(0.98);
-      expect(reliability).toBeGreaterThan(0.42);
-    });
-
-    test("returns low reliability for model-derived fallback", () => {
-      const reliability = getCrimeSignalReliability("model-derived", 100);
-      expect(reliability).toBe(0.28);
-    });
-
-    test("reliability scales with coverage", () => {
-      const source = "osm-proxy";
-      const low = getCrimeSignalReliability(source, 25);
-      const mid = getCrimeSignalReliability(source, 50);
-      const high = getCrimeSignalReliability(source, 100);
-      expect(low).toBeLessThan(mid);
-      expect(mid).toBeLessThan(high);
+      expect(high.penalty).toBeGreaterThan(low.penalty);
+      expect(high.reliability).toBeGreaterThan(low.reliability);
     });
   });
 
-  describe("trainRiskModel", () => {
-    test("scales penalty by reliability weight", () => {
-      const obs = [{ baseWeight: 1.0 }];
-      const anom = [{ delta: 0.5 }];
+  describe('Scoring and route optimization integration', () => {
+    test('calculateSafetyScore applies risk penalty and clamps range', () => {
+      const services = {
+        police: [{ distance: 180 }],
+        hospital: [{ distance: 300 }],
+        fire: [{ distance: 700 }]
+      };
+      const cameras = [{ status: 'active' }, { status: 'active' }, { status: 'active' }];
+      const areaInfo = { type: 'residential', category: 'residential' };
 
-      const lowReliability = trainRiskModel(obs, anom, 0.3);
-      const highReliability = trainRiskModel(obs, anom, 0.9);
+      const withoutRisk = calculateSafetyScore(13, services, cameras, areaInfo, null).score;
+      const withRisk = calculateSafetyScore(13, services, cameras, areaInfo, { penalty: 20, confidence: 'high' }).score;
 
-      expect(highReliability.penalty).toBeGreaterThan(lowReliability.penalty);
+      expect(withoutRisk).toBeGreaterThan(withRisk);
+      expect(withoutRisk).toBeGreaterThanOrEqual(0);
+      expect(withoutRisk).toBeLessThanOrEqual(100);
+      expect(withRisk).toBeGreaterThanOrEqual(0);
+      expect(withRisk).toBeLessThanOrEqual(100);
     });
 
-    test("returns non-zero penalty for non-empty observations", () => {
-      const obs = [{ baseWeight: 1.0 }];
-      const anom = [{ delta: 0.5 }];
-      const result = trainRiskModel(obs, anom, 0.7);
-
-      expect(result.penalty).toBeGreaterThan(0);
-    });
-
-    test("returns reliability percent between 20 and 100", () => {
-      const obs = [{ baseWeight: 1.0 }];
-      const anom = [{ delta: 0.5 }];
-
-      const lowReliability = trainRiskModel(obs, anom, 0.15);
-      const highReliability = trainRiskModel(obs, anom, 0.95);
-
-      expect(lowReliability.reliabilityPercent).toBeGreaterThanOrEqual(20);
-      expect(highReliability.reliabilityPercent).toBeLessThanOrEqual(100);
-    });
-
-    test("handles empty observations gracefully", () => {
-      const obs = [];
-      const anom = [{ delta: 0.5 }];
-      const result = trainRiskModel(obs, anom, 0.7);
-
-      expect(result).toHaveProperty("penalty");
-      expect(result).toHaveProperty("reliabilityPercent");
-    });
-
-    test("applies minimum reliability floor of 0.2", () => {
-      const obs = [{ baseWeight: 1.0 }];
-      const anom = [{ delta: 0.5 }];
-      const result = trainRiskModel(obs, anom, 0.01); // Very low reliability
-
-      expect(result.reliabilityPercent).toBeGreaterThanOrEqual(20); // 0.2 * 100
-    });
-  });
-
-  describe("Integration: Distance Decay + Hotspot Normalization", () => {
-    test("combined distance and hotspot logic identifies nearby high-severity hotspots", () => {
-      const hotspots = [
-        { lat: 48.8566, lng: 2.3522, type: "falling_rocks", title: "Nearby Severe", source: "osm" }, // 3.1
-        { lat: 48.9266, lng: 2.3522, type: "accident", title: "Distant Mild", source: "osm" }, // ~7.8km away, severity 2.4
+    test('safest mode prefers lower exposure route while fastest prefers lower ETA route', () => {
+      const alternatives = [
+        {
+          id: 'route_a',
+          label: 'Route A',
+          distance: 4200,
+          duration: 540,
+          path: [[12.9716, 77.5946], [12.978, 77.602]],
+          steps: [{}, {}, {}, {}, {}, {}, {}]
+        },
+        {
+          id: 'route_b',
+          label: 'Route B',
+          distance: 4700,
+          duration: 700,
+          path: [[12.94, 77.54], [12.948, 77.548]],
+          steps: [{}, {}]
+        }
       ];
 
-      const normalized = normalizeAndRankHotspots(hotspots);
-      const weight1 = getDistanceDecayWeight(0);
-      const weight2 = getDistanceDecayWeight(7800);
+      const riskData = {
+        penalty: 18,
+        confidence: 'high',
+        accidentHotspots: 3,
+        conflictPoints: 4,
+        hotspots: [
+          { lat: 12.9716, lng: 77.5946, type: 'violent', source: 'feed', title: 'Critical point' }
+        ]
+      };
 
-      expect(normalized[0].title).toBe("Nearby Severe"); // High severity prioritized after dedup
-      expect(weight1).toBeGreaterThan(weight2); // Nearby weight > distant weight
+      const safest = optimizeRouteAlternatives(alternatives, 'safest', 'driving', { hour: 22, riskData, edgeAiScore: 25 });
+      const fastest = optimizeRouteAlternatives(alternatives, 'fastest', 'driving', { hour: 22, riskData, edgeAiScore: 25 });
+
+      expect(safest.selectedRouteId).toBe('route_b');
+      expect(fastest.selectedRouteId).toBe('route_a');
+    });
+  });
+
+  describe('Security behavior: service worker cache guards', () => {
+    beforeEach(() => {
+      globalThis.self = { location: { origin: 'https://safezone.test' } };
+    });
+
+    afterEach(() => {
+      delete globalThis.self;
+    });
+
+    test('uses current cache namespace version', () => {
+      expect(CACHE_NAME).toMatch(/^safezone-shell-v\d+$/);
+    });
+
+    test('only basic successful responses are cacheable', () => {
+      expect(isSafeCacheableResponse({ ok: true, type: 'basic' })).toBe(true);
+      expect(isSafeCacheableResponse({ ok: true, type: 'opaque' })).toBe(false);
+      expect(isSafeCacheableResponse({ ok: false, type: 'basic' })).toBe(false);
+    });
+
+    test('blocks querystring runtime requests from shell cache', () => {
+      const request = { method: 'GET', mode: 'same-origin' };
+      const requestUrl = new URL('https://safezone.test/app.js?cacheBust=1');
+      expect(isCacheableShellRequest(request, requestUrl)).toBe(false);
+    });
+
+    test('permits same-origin navigation and denies cross-origin fetches', () => {
+      const navRequest = { method: 'GET', mode: 'navigate' };
+      const sameOrigin = new URL('https://safezone.test/index.html');
+      const crossOrigin = new URL('https://example.com/index.html');
+
+      expect(isCacheableShellRequest(navRequest, sameOrigin)).toBe(true);
+      expect(isCacheableShellRequest(navRequest, crossOrigin)).toBe(false);
+    });
+  });
+
+  describe('Security behavior: Google key handling', () => {
+    afterEach(() => {
+      delete global.window;
+      delete global.document;
+    });
+
+    test('does not report Google API key availability by default', () => {
+      expect(hasGoogleApiKey()).toBe(false);
+    });
+
+    test('accepts a valid SAFEZONE_GOOGLE_API_KEY from window', () => {
+      global.window = { SAFEZONE_GOOGLE_API_KEY: 'AIzaSyA123456789012345678901234567890AB' };
+      expect(getGoogleApiKey()).toBe('AIzaSyA123456789012345678901234567890AB');
+      expect(hasGoogleApiKey()).toBe(true);
+    });
+
+    test('rejects malformed keys from window', () => {
+      global.window = { SAFEZONE_GOOGLE_API_KEY: 'AIzaSyA1234567890<script>alert(1)</script>' };
+      expect(getGoogleApiKey()).toBe('');
+      expect(hasGoogleApiKey()).toBe(false);
+    });
+
+    test('falls back to meta tag when window key is missing', () => {
+      global.window = {};
+      global.document = {
+        querySelector: jest.fn(() => ({
+          getAttribute: jest.fn(() => 'AIzaSyB123456789012345678901234567890CD')
+        }))
+      };
+
+      expect(getGoogleApiKey()).toBe('AIzaSyB123456789012345678901234567890CD');
+      expect(hasGoogleApiKey()).toBe(true);
+    });
+
+    test('ignores placeholder-looking keys in meta tags', () => {
+      global.window = {};
+      global.document = {
+        querySelector: jest.fn(() => ({
+          getAttribute: jest.fn(() => 'YOUR_GOOGLE_API_KEY')
+        }))
+      };
+
+      expect(getGoogleApiKey()).toBe('');
+      expect(hasGoogleApiKey()).toBe(false);
     });
   });
 });

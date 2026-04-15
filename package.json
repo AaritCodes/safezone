@@ -1,0 +1,13 @@
+{
+  "name": "safezone",
+  "version": "2.1.0",
+  "private": true,
+  "description": "SafeZone - real-time area safety monitor",
+  "scripts": {
+    "test": "jest --runInBand --config jest.config.cjs",
+    "test:watch": "jest --watch --config jest.config.cjs"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  }
+}

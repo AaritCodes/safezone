@@ -89,6 +89,7 @@ jobs:
           docker run -d --rm --name safezone-smoke -p 8787:8787 \
             -e NODE_ENV=production \
             -e SAFEZONE_AUTH_REQUIRED=false \
+            -e SAFEZONE_CORS_ORIGINS=http://localhost:8787 \
             -e SAFEZONE_CV_MODE=simulation \
             -e SAFEZONE_TRACING_ENABLED=true \
             "$IMAGE_NAME:${{ needs.build_image.outputs.image_tag }}"

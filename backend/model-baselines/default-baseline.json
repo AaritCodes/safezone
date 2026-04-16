@@ -1,4 +1,7 @@
 {
+  "version": "baseline-2026-04",
+  "promotedAt": "2026-04-01T00:00:00.000Z",
+  "modelVersion": "safezone-product-risk-v1",
   "metrics": {
     "sceneRiskScore": [0.10, 0.20, 0.35, 0.25, 0.10],
     "detectionCount": [0.25, 0.35, 0.25, 0.10, 0.05],

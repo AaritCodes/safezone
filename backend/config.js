@@ -86,7 +86,9 @@ function readConfig() {
       minRequestCount: parseInteger(process.env.SAFEZONE_ALERTING_MIN_REQUEST_COUNT, 20, 1, 100000),
       errorRateThreshold: parseNumber(process.env.SAFEZONE_ALERTING_ERROR_RATE_THRESHOLD, 0.05, 0.001, 1),
       p95LatencyMsThreshold: parseInteger(process.env.SAFEZONE_ALERTING_P95_LATENCY_MS_THRESHOLD, 800, 50, 120000),
-      cooldownMs: parseInteger(process.env.SAFEZONE_ALERTING_COOLDOWN_MS, 300000, 5000, 3600000)
+      cooldownMs: parseInteger(process.env.SAFEZONE_ALERTING_COOLDOWN_MS, 300000, 5000, 3600000),
+      governanceEnabled: parseBoolean(process.env.SAFEZONE_ALERTING_GOVERNANCE_ENABLED, true),
+      governanceCooldownMs: parseInteger(process.env.SAFEZONE_ALERTING_GOVERNANCE_COOLDOWN_MS, 900000, 5000, 3600000)
     },
     governance: {
       enabled: parseBoolean(process.env.SAFEZONE_GOVERNANCE_ENABLED, true),
@@ -95,7 +97,17 @@ function readConfig() {
       calibrationBrierThreshold: parseNumber(process.env.SAFEZONE_GOVERNANCE_BRIER_THRESHOLD, 0.22, 0.01, 1),
       minLabelsForCalibration: parseInteger(process.env.SAFEZONE_GOVERNANCE_MIN_LABELS, 50, 5, 100000),
       maxInferenceSamples: parseInteger(process.env.SAFEZONE_GOVERNANCE_MAX_INFERENCE_SAMPLES, 5000, 100, 1000000),
-      maxLabelSamples: parseInteger(process.env.SAFEZONE_GOVERNANCE_MAX_LABEL_SAMPLES, 2000, 50, 500000)
+      maxLabelSamples: parseInteger(process.env.SAFEZONE_GOVERNANCE_MAX_LABEL_SAMPLES, 2000, 50, 500000),
+      staleInferenceHours: parseInteger(process.env.SAFEZONE_GOVERNANCE_STALE_INFERENCE_HOURS, 24, 1, 720),
+      staleLabelHours: parseInteger(process.env.SAFEZONE_GOVERNANCE_STALE_LABEL_HOURS, 336, 1, 4320),
+      maxNullRate: parseNumber(process.env.SAFEZONE_GOVERNANCE_MAX_NULL_RATE, 0.35, 0, 1),
+      maxHistoryDays: parseInteger(process.env.SAFEZONE_GOVERNANCE_MAX_HISTORY_DAYS, 180, 7, 2000),
+      historyEnabled: parseBoolean(process.env.SAFEZONE_GOVERNANCE_HISTORY_ENABLED, true),
+      historyFileName: String(process.env.SAFEZONE_GOVERNANCE_HISTORY_FILE || 'governance-history.json').trim(),
+      baselineFileName: String(process.env.SAFEZONE_GOVERNANCE_BASELINE_FILE || 'default-baseline.json').trim(),
+      manifestFileName: String(process.env.SAFEZONE_GOVERNANCE_MANIFEST_FILE || 'model-manifest.json').trim(),
+      calibrationBinCount: parseInteger(process.env.SAFEZONE_GOVERNANCE_CALIBRATION_BINS, 10, 5, 20),
+      minLabelsForDiscrimination: parseInteger(process.env.SAFEZONE_GOVERNANCE_MIN_LABELS_FOR_AUC, 50, 5, 100000)
     }
   };
 }

@@ -26,6 +26,9 @@ Alert conditions are configured through environment variables:
 Alert types:
 - `high_error_rate`
 - `high_latency_p95`
+- `governance_model_requires_action`
+- `governance_data_pipeline_breakage`
+- `governance_monitoring`
 
 ## Incident Runbook: High Error Rate
 
@@ -62,6 +65,47 @@ Response steps:
 4. Temporarily route to simulation mode if remote model is unstable.
 5. If platform-wide latency remains high, scale replicas or rollback to previous image.
 
+## Incident Runbook: Governance Drift Spike
+
+Trigger:
+- Governance status `requires_action` with incident class `drift_spike`.
+
+Response steps:
+1. Fetch governance report:
+   - `GET /api/governance/report`
+2. Identify breached metrics in `report.drift`.
+3. Compare rolling 7-day vs 30-day trend values.
+4. Validate upstream feature distribution changes (camera density, public risk density, area slices).
+5. Freeze promotion and start retraining data review.
+6. If impact is user-facing, roll back to previous approved baseline/model.
+
+## Incident Runbook: Calibration Decay
+
+Trigger:
+- Governance status `requires_action` with incident class `calibration_decay`.
+
+Response steps:
+1. Inspect `report.calibration.brierScore` and calibration bins.
+2. Validate label freshness and class balance.
+3. Check discrimination metrics (`auroc`, `prAuc`) for degradation.
+4. Run recalibration workflow (temperature scaling or threshold tuning).
+5. Re-evaluate governance before promotion.
+
+## Incident Runbook: Data Pipeline Breakage
+
+Trigger:
+- Governance status `requires_action` with incident class `data_pipeline_breakage`.
+- `report.freshness.inferenceStale` is true.
+
+Response steps:
+1. Validate `/api/safety/analyze` throughput and governance ingestion counters:
+   - `safezone_governance_inference_accepted_total`
+   - `safezone_governance_inference_rejected_total`
+2. Confirm schema rejection reasons in governance report ingestion quality block.
+3. Inspect tracing IDs to ensure inference events are emitted from request flow.
+4. Fix event schema mapping or upstream payload contract regressions.
+5. Keep promotion blocked until freshness recovers and status exits `requires_action`.
+
 ## Trace-Driven Debugging
 
 Each request includes:
@@ -80,3 +124,10 @@ Use these identifiers to correlate:
 2. Record mitigation timeline and resolution duration.
 3. Update alert thresholds only if noise was validated for multiple incidents.
 4. Update this runbook if new failure modes were observed.
+
+## Governance Review Cadence
+
+1. Weekly model review:
+   - Drift trend, calibration trend, ingestion rejection rate, stale data checks.
+2. Monthly governance audit:
+   - Model manifest owner/approval, baseline version freshness, release gate decisions, and rollback readiness.

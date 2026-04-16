@@ -1,0 +1,16 @@
+{
+  "modelVersion": "safezone-product-risk-v1",
+  "owner": "SafeZone ML Team",
+  "trainingWindow": "2026-01-01 to 2026-03-31",
+  "intendedUse": "Risk-aware mobility and area safety scoring support in SafeZone backend APIs.",
+  "limitations": [
+    "Scores are advisory and should not replace emergency response decisions.",
+    "Sparse camera coverage and missing labels reduce confidence quality.",
+    "Out-of-region deployment requires baseline refresh and local calibration."
+  ],
+  "approval": {
+    "status": "approved",
+    "approvedBy": "safezone-model-owner",
+    "approvedAt": "2026-04-01T00:00:00.000Z"
+  }
+}

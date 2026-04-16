@@ -17,7 +17,9 @@ class AlertManager {
       minRequestCount: Number(config.minRequestCount || 20),
       errorRateThreshold: Number(config.errorRateThreshold || 0.05),
       p95LatencyMsThreshold: Number(config.p95LatencyMsThreshold || 800),
-      cooldownMs: Number(config.cooldownMs || 300000)
+      cooldownMs: Number(config.cooldownMs || 300000),
+      governanceEnabled: config.governanceEnabled !== false,
+      governanceCooldownMs: Number(config.governanceCooldownMs || 900000)
     };
 
     this.logger = logger || {
@@ -28,7 +30,10 @@ class AlertManager {
     this.events = [];
     this.lastSent = {
       high_error_rate: 0,
-      high_latency_p95: 0
+      high_latency_p95: 0,
+      governance_model_requires_action: 0,
+      governance_data_pipeline_breakage: 0,
+      governance_monitoring: 0
     };
     this.lastDeliveryError = null;
     this.lastSentAt = null;
@@ -73,6 +78,7 @@ class AlertManager {
     return {
       type,
       service: 'safezone-backend',
+      category: 'slo',
       timestamp: new Date().toISOString(),
       stats,
       thresholds: {
@@ -83,19 +89,28 @@ class AlertManager {
     };
   }
 
-  async dispatch(type, stats, now) {
-    this.activeAlerts = this.activeAlerts.filter((item) => item.type !== type);
-    this.activeAlerts.push({
+  buildGovernancePayload(type, report, severity) {
+    return {
       type,
-      triggeredAt: new Date(now).toISOString(),
-      stats
-    });
+      service: 'safezone-backend',
+      category: 'governance',
+      severity,
+      timestamp: new Date().toISOString(),
+      report: {
+        status: report && report.status ? report.status : 'unknown',
+        incidentClass: report && report.incidentClass ? report.incidentClass : 'unknown',
+        generatedAt: report && report.generatedAt ? report.generatedAt : new Date().toISOString(),
+        sampleCounts: report && report.sampleCounts ? report.sampleCounts : {},
+        freshness: report && report.freshness ? report.freshness : {},
+        ingestionQuality: report && report.ingestionQuality ? report.ingestionQuality : {},
+        recommendations: Array.isArray(report && report.recommendations)
+          ? report.recommendations.slice(0, 5)
+          : []
+      }
+    };
+  }
 
-    this.lastSent[type] = now;
-    this.lastSentAt = new Date(now).toISOString();
-
-    const payload = this.buildPayload(type, stats);
-
+  async sendPayload(type, payload, now) {
     if (!this.config.enabled || !this.config.webhookUrl) {
       this.logger.warn('alert.triggered', payload);
       return;
@@ -151,6 +166,38 @@ class AlertManager {
     }
   }
 
+  async dispatch(type, stats, now) {
+    this.activeAlerts = this.activeAlerts.filter((item) => item.type !== type);
+    this.activeAlerts.push({
+      type,
+      triggeredAt: new Date(now).toISOString(),
+      stats
+    });
+
+    this.lastSent[type] = now;
+    this.lastSentAt = new Date(now).toISOString();
+
+    const payload = this.buildPayload(type, stats);
+    await this.sendPayload(type, payload, now);
+  }
+
+  async dispatchGovernance(type, report, severity, now) {
+    this.activeAlerts = this.activeAlerts.filter((item) => String(item.type || '').indexOf('governance_') !== 0);
+    this.activeAlerts.push({
+      type,
+      severity,
+      triggeredAt: new Date(now).toISOString(),
+      reportStatus: report && report.status ? report.status : 'unknown',
+      incidentClass: report && report.incidentClass ? report.incidentClass : 'unknown'
+    });
+
+    this.lastSent[type] = now;
+    this.lastSentAt = new Date(now).toISOString();
+
+    const payload = this.buildGovernancePayload(type, report, severity);
+    await this.sendPayload(type, payload, now);
+  }
+
   async evaluate(now = Date.now()) {
     const stats = this.computeWindowStats();
     if (stats.sampleSize < this.config.minRequestCount) {
@@ -180,6 +227,43 @@ class AlertManager {
     }
   }
 
+  async observeGovernance(report = {}) {
+    if (!this.config.governanceEnabled) return;
+
+    const now = Date.now();
+    const status = String(report && report.status ? report.status : 'unknown');
+    const freshness = report && typeof report.freshness === 'object'
+      ? report.freshness
+      : {};
+    const isStale = Boolean(freshness.inferenceStale);
+
+    let type = '';
+    let severity = 'warning';
+
+    if (isStale) {
+      type = 'governance_data_pipeline_breakage';
+      severity = 'critical';
+    } else if (status === 'requires_action') {
+      type = 'governance_model_requires_action';
+      severity = 'critical';
+    } else if (status === 'monitoring') {
+      type = 'governance_monitoring';
+      severity = 'warning';
+    }
+
+    if (!type) {
+      this.activeAlerts = this.activeAlerts.filter((item) => String(item.type || '').indexOf('governance_') !== 0);
+      return;
+    }
+
+    const lastSentAt = Number(this.lastSent[type] || 0);
+    if (now - lastSentAt < this.config.governanceCooldownMs) {
+      return;
+    }
+
+    await this.dispatchGovernance(type, report, severity, now);
+  }
+
   getStatus() {
     const stats = this.computeWindowStats();
     return {
@@ -190,7 +274,9 @@ class AlertManager {
         minRequestCount: this.config.minRequestCount,
         errorRateThreshold: this.config.errorRateThreshold,
         p95LatencyMsThreshold: this.config.p95LatencyMsThreshold,
-        cooldownMs: this.config.cooldownMs
+        cooldownMs: this.config.cooldownMs,
+        governanceEnabled: this.config.governanceEnabled,
+        governanceCooldownMs: this.config.governanceCooldownMs
       },
       windowStats: stats,
       lastSentAt: this.lastSentAt,

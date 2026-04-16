@@ -158,7 +158,32 @@ jobs:
             -H "x-api-key: $SAFEZONE_API_KEY" \
             "$SAFEZONE_BACKEND_URL/api/governance/report" > governance-gate.json
 
-          node -e "const fs=require('fs');const payload=JSON.parse(fs.readFileSync('governance-gate.json','utf8'));const status=((payload||{}).report||{}).status||'unknown';console.log('governance gate status:', status);if(status==='requires_action'){process.exit(1);}"
+          node <<'NODE'
+          const fs = require('fs');
+
+          const payload = JSON.parse(fs.readFileSync('governance-gate.json', 'utf8'));
+          const report = (payload || {}).report || {};
+          const status = String(report.status || 'unknown');
+          const severity = String(report.severity || 'warning');
+          const staleInference = Boolean(report.freshness && report.freshness.inferenceStale);
+
+          console.log('governance gate status:', status);
+          console.log('governance gate severity:', severity);
+
+          if (staleInference) {
+            console.error('::error::Governance gate failed: inference telemetry is stale.');
+            process.exit(1);
+          }
+
+          if (status === 'requires_action') {
+            console.error('::error::Governance gate failed: status requires_action.');
+            process.exit(1);
+          }
+
+          if (status === 'monitoring') {
+            console.log('::warning::Governance gate is monitoring. Explicit model-owner approval is recommended.');
+          }
+          NODE
 
       - name: Prepare deployment payload
         run: |

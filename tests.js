@@ -485,6 +485,71 @@ describe('SafeZone Production Logic', () => {
       expect(report.calibration.status).toBe('evaluated');
       expect(report.sampleCounts.labels).toBe(2);
     });
+
+    test('rejects low-quality inference events when schema null-rate is exceeded', () => {
+      const governance = createModelGovernance({
+        maxNullRate: 0.1
+      }, {
+        warn: jest.fn(),
+        info: jest.fn(),
+        error: jest.fn()
+      });
+
+      const result = governance.recordInference({
+        traceId: 'trace-missing-schema'
+      });
+
+      expect(result.accepted).toBe(false);
+      const report = governance.getReport();
+      expect(report.ingestionQuality.rejectedInference).toBe(1);
+    });
+
+    test('includes slice analytics and manifest metadata in governance report', () => {
+      const governance = createModelGovernance({
+        minSamplesForDrift: 1,
+        minLabelsForCalibration: 1,
+        minLabelsForDiscrimination: 1,
+        historyEnabled: false
+      }, {
+        warn: jest.fn(),
+        info: jest.fn(),
+        error: jest.fn()
+      });
+
+      governance.recordInference({
+        traceId: 'trace-slice-1',
+        modelVersion: 'safezone-product-risk-v1',
+        sourceMode: 'remote',
+        sceneRiskScore: 77,
+        detectionCount: 6,
+        sceneConfidence: 0.81,
+        predictedProbability: 0.67,
+        inferenceLatencyMs: 120,
+        inputSummary: {
+          hour: 22,
+          areaType: 'commercial',
+          areaCategory: 'market',
+          serviceCount: 4,
+          cameraCount: 3,
+          publicRiskSignals: 5
+        }
+      });
+
+      governance.recordGroundTruth({
+        traceId: 'trace-slice-1',
+        predictedProbability: 0.67,
+        incidentOccurred: true,
+        modelVersion: 'safezone-product-risk-v1',
+        sourceMode: 'remote'
+      });
+
+      const report = governance.getReport();
+      const hourBucketSamples = Object.values(report.slices.hourBucket)
+        .reduce((sum, item) => sum + Number(item.sampleSize || 0), 0);
+      expect(hourBucketSamples).toBeGreaterThanOrEqual(1);
+      expect(report.metadata.model.owner).toBeTruthy();
+      expect(report.trend).toBeDefined();
+    });
   });
 
   describe('Alerting window evaluation', () => {
@@ -508,6 +573,36 @@ describe('SafeZone Production Logic', () => {
       expect(status.windowStats.sampleSize).toBe(2);
       expect(status.windowStats.errorRate).toBeGreaterThan(0);
       expect(status.windowStats.p95LatencyMs).toBeGreaterThanOrEqual(320);
+    });
+
+    test('emits governance alert signal for requires_action report', async () => {
+      const alerting = createAlertManager({
+        enabled: false,
+        governanceEnabled: true,
+        governanceCooldownMs: 0
+      }, {
+        warn: jest.fn(),
+        error: jest.fn(),
+        info: jest.fn()
+      });
+
+      await alerting.observeGovernance({
+        status: 'requires_action',
+        incidentClass: 'drift_spike',
+        generatedAt: new Date().toISOString(),
+        sampleCounts: {
+          inference: 10,
+          labels: 3
+        },
+        freshness: {
+          inferenceStale: false
+        },
+        ingestionQuality: {},
+        recommendations: []
+      });
+
+      const status = alerting.getStatus();
+      expect(status.activeAlerts.some((item) => item.type === 'governance_model_requires_action')).toBe(true);
     });
   });
 });

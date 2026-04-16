@@ -16,7 +16,11 @@ class MetricsStore {
       authRejectedTotal: 0,
       rateLimitedTotal: 0,
       validationFailedTotal: 0,
-      internalErrorTotal: 0
+      internalErrorTotal: 0,
+      governanceInferenceAcceptedTotal: 0,
+      governanceInferenceRejectedTotal: 0,
+      governanceLabelAcceptedTotal: 0,
+      governanceLabelRejectedTotal: 0
     };
     this.durationSecondsSum = 0;
     this.durationSecondsCount = 0;
@@ -63,6 +67,24 @@ class MetricsStore {
     this.errorCounters.internalErrorTotal += 1;
   }
 
+  noteGovernanceInference(accepted) {
+    if (accepted) {
+      this.errorCounters.governanceInferenceAcceptedTotal += 1;
+      return;
+    }
+
+    this.errorCounters.governanceInferenceRejectedTotal += 1;
+  }
+
+  noteGovernanceLabel(accepted) {
+    if (accepted) {
+      this.errorCounters.governanceLabelAcceptedTotal += 1;
+      return;
+    }
+
+    this.errorCounters.governanceLabelRejectedTotal += 1;
+  }
+
   toPrometheus() {
     const lines = [];
 
@@ -105,6 +127,22 @@ class MetricsStore {
     lines.push('# HELP safezone_internal_error_total Internal server errors');
     lines.push('# TYPE safezone_internal_error_total counter');
     lines.push(`safezone_internal_error_total ${this.errorCounters.internalErrorTotal}`);
+
+    lines.push('# HELP safezone_governance_inference_accepted_total Inference events accepted by governance schema checks');
+    lines.push('# TYPE safezone_governance_inference_accepted_total counter');
+    lines.push(`safezone_governance_inference_accepted_total ${this.errorCounters.governanceInferenceAcceptedTotal}`);
+
+    lines.push('# HELP safezone_governance_inference_rejected_total Inference events rejected by governance schema checks');
+    lines.push('# TYPE safezone_governance_inference_rejected_total counter');
+    lines.push(`safezone_governance_inference_rejected_total ${this.errorCounters.governanceInferenceRejectedTotal}`);
+
+    lines.push('# HELP safezone_governance_labels_accepted_total Ground-truth labels accepted by governance endpoint');
+    lines.push('# TYPE safezone_governance_labels_accepted_total counter');
+    lines.push(`safezone_governance_labels_accepted_total ${this.errorCounters.governanceLabelAcceptedTotal}`);
+
+    lines.push('# HELP safezone_governance_labels_rejected_total Ground-truth labels rejected by governance endpoint');
+    lines.push('# TYPE safezone_governance_labels_rejected_total counter');
+    lines.push(`safezone_governance_labels_rejected_total ${this.errorCounters.governanceLabelRejectedTotal}`);
 
     lines.push('# HELP safezone_process_uptime_seconds Backend process uptime in seconds');
     lines.push('# TYPE safezone_process_uptime_seconds gauge');

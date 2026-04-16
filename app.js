@@ -1015,6 +1015,158 @@ function showSidebarLoading() {
   `;
 }
 
+function normalizeHourValue(hour) {
+  const numericHour = Number(hour);
+  if (!Number.isFinite(numericHour)) return new Date().getHours();
+  return ((Math.round(numericHour) % 24) + 24) % 24;
+}
+
+function getConfidenceTone(confidenceValue) {
+  const normalized = String(confidenceValue || 'low').trim().toLowerCase();
+  if (normalized === 'high') {
+    return {
+      label: 'High confidence',
+      className: 'high'
+    };
+  }
+
+  if (normalized === 'medium') {
+    return {
+      label: 'Medium confidence',
+      className: 'medium'
+    };
+  }
+
+  return {
+    label: 'Low confidence',
+    className: 'low'
+  };
+}
+
+function buildSafetyOutlookSummary(hour, services, cameras, areaInfo, riskData) {
+  const normalizedHour = normalizeHourValue(hour);
+  const projectionRiskData = riskData && typeof riskData === 'object' && riskData.productAssessment
+    ? { ...riskData, productAssessment: null }
+    : riskData;
+
+  const nowProjection = calculateSafetyScore(normalizedHour, services, cameras, areaInfo, projectionRiskData);
+  const baseScore = Number.isFinite(Number(nowProjection && nowProjection.score))
+    ? Number(nowProjection.score)
+    : 50;
+
+  const windows = [
+    { offset: 0, label: 'Now' },
+    { offset: 1, label: '+1 hour' },
+    { offset: 3, label: '+3 hours' }
+  ];
+
+  return windows.map((windowItem) => {
+    const projectedHour = (normalizedHour + windowItem.offset) % 24;
+    const scoreData = calculateSafetyScore(projectedHour, services, cameras, areaInfo, projectionRiskData);
+    const projectedScore = Number.isFinite(Number(scoreData && scoreData.score))
+      ? Math.round(Number(scoreData.score))
+      : Math.round(baseScore);
+
+    const delta = projectedScore - Math.round(baseScore);
+    const deltaLabel = delta === 0
+      ? 'Stable trend'
+      : `${delta > 0 ? '+' : ''}${delta} vs now`;
+
+    return {
+      label: `${windowItem.label} (${formatTime(projectedHour)})`,
+      score: projectedScore,
+      deltaLabel,
+      stateClass: delta >= 4 ? 'safer' : delta <= -4 ? 'riskier' : 'steady'
+    };
+  });
+}
+
+function buildEmergencyReadinessSummary(services, activeCameraCount) {
+  const nearestPolice = Array.isArray(services && services.police) && services.police.length > 0
+    ? services.police[0]
+    : null;
+  const nearestHospital = Array.isArray(services && services.hospital) && services.hospital.length > 0
+    ? services.hospital[0]
+    : null;
+  const nearestFire = Array.isArray(services && services.fire) && services.fire.length > 0
+    ? services.fire[0]
+    : null;
+
+  let score = 100;
+
+  const policeDistance = Number(nearestPolice && nearestPolice.distance);
+  if (!nearestPolice) score -= 34;
+  else if (Number.isFinite(policeDistance) && policeDistance > 2500) score -= 22;
+  else if (Number.isFinite(policeDistance) && policeDistance > 1500) score -= 12;
+  else if (Number.isFinite(policeDistance) && policeDistance > 900) score -= 6;
+
+  const hospitalDistance = Number(nearestHospital && nearestHospital.distance);
+  if (!nearestHospital) score -= 30;
+  else if (Number.isFinite(hospitalDistance) && hospitalDistance > 2500) score -= 20;
+  else if (Number.isFinite(hospitalDistance) && hospitalDistance > 1500) score -= 10;
+  else if (Number.isFinite(hospitalDistance) && hospitalDistance > 900) score -= 4;
+
+  const fireDistance = Number(nearestFire && nearestFire.distance);
+  if (!nearestFire) score -= 18;
+  else if (Number.isFinite(fireDistance) && fireDistance > 2800) score -= 12;
+  else if (Number.isFinite(fireDistance) && fireDistance > 1800) score -= 7;
+  else if (Number.isFinite(fireDistance) && fireDistance > 1000) score -= 3;
+
+  if (activeCameraCount === 0) score -= 14;
+  else if (activeCameraCount < 2) score -= 8;
+
+  score = Math.max(0, Math.min(100, Math.round(score)));
+
+  if (score >= 75) {
+    return {
+      score,
+      label: 'Ready for travel',
+      className: 'ready',
+      summary: 'Emergency coverage and visibility are strong for this location.'
+    };
+  }
+
+  if (score >= 50) {
+    return {
+      score,
+      label: 'Watchful travel',
+      className: 'watchful',
+      summary: 'Travel is possible, but keep emergency actions and route choices active.'
+    };
+  }
+
+  return {
+    score,
+    label: 'Limited readiness',
+    className: 'limited',
+    summary: 'Emergency response may be delayed. Use extra caution and share your route.'
+  };
+}
+
+function buildSafetyChecklist(hour, nearestPolice, nearestHospital, activeCameraCount) {
+  const checklist = [];
+  const normalizedHour = normalizeHourValue(hour);
+
+  if (normalizedHour >= 21 || normalizedHour <= 5) {
+    checklist.push('Prefer well-lit main roads during late-hour travel.');
+  }
+
+  if (!nearestPolice || Number(nearestPolice.distance) > 2000) {
+    checklist.push('Share live location with a trusted contact before departure.');
+  }
+
+  if (!nearestHospital || Number(nearestHospital.distance) > 2500) {
+    checklist.push('Keep emergency transport options ready for medical support.');
+  }
+
+  if (activeCameraCount < 2) {
+    checklist.push('Stay near populated routes with visible surveillance coverage.');
+  }
+
+  checklist.push('Keep your phone charged and emergency numbers one tap away.');
+  return checklist.slice(0, 3);
+}
+
 // ── Sidebar ───────────────────────────────────────────────────
 function updateSidebar(score, level, areaInfo, services, cameras, risks, features, lat, lng, factors, riskData) {
   const scoreColor = level.class === 'very-safe' ? '#22c55e' :
@@ -1063,6 +1215,51 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
   ));
   const safeLat = safeMapCoordinate(lat, -90, 90);
   const safeLng = safeMapCoordinate(lng, -180, 180);
+  const normalizedHour = normalizeHourValue(currentHour);
+  const confidenceTone = getConfidenceTone(riskData && riskData.confidence);
+  const safetyOutlook = buildSafetyOutlookSummary(normalizedHour, services, cameraArray, areaInfo, riskData);
+  const nearestPolice = Array.isArray(services.police) && services.police.length > 0 ? services.police[0] : null;
+  const nearestHospital = Array.isArray(services.hospital) && services.hospital.length > 0 ? services.hospital[0] : null;
+  const nearestFire = Array.isArray(services.fire) && services.fire.length > 0 ? services.fire[0] : null;
+  const readinessSummary = buildEmergencyReadinessSummary(services, activeCams.length);
+  const readinessChecklist = buildSafetyChecklist(normalizedHour, nearestPolice, nearestHospital, activeCams.length);
+  const snapshotReasons = [...(Array.isArray(risks) ? risks : []), ...(Array.isArray(factors) ? factors : [])]
+    .map((item) => normalizeDisplayText(item, 120))
+    .filter(Boolean)
+    .slice(0, 3);
+  const snapshotActionsRaw = Array.isArray(riskData && riskData.recommendations) && riskData.recommendations.length > 0
+    ? riskData.recommendations
+    : (Array.isArray(features) ? features : []);
+  const snapshotActions = snapshotActionsRaw
+    .map((item) => normalizeDisplayText(item, 110))
+    .filter(Boolean)
+    .slice(0, 2);
+  const updatedAt = new Date().toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+  const emergencyDial = (() => {
+    const normalizedUnified = sanitizePhoneNumber(nums.unified);
+    if (isValidPhoneNumber(normalizedUnified)) return normalizedUnified;
+
+    const normalizedPolice = sanitizePhoneNumber(nums.police);
+    if (isValidPhoneNumber(normalizedPolice)) return normalizedPolice;
+
+    return '';
+  })();
+  const nearestHospitalLat = nearestHospital
+    ? safeMapCoordinate(nearestHospital.lat, -90, 90)
+    : null;
+  const nearestHospitalLng = nearestHospital
+    ? safeMapCoordinate(nearestHospital.lng, -180, 180)
+    : null;
+  const nearestHospitalName = nearestHospital
+    ? escapeJsString(nearestHospital.name || 'Nearest hospital')
+    : '';
+
+  if (snapshotReasons.length === 0) {
+    snapshotReasons.push('No major risk signals detected for this location at this time.');
+  }
 
   const isFavorite = favoriteLocations.some(fav =>
     Math.abs(fav.lat - safeLat) < 0.0001 && Math.abs(fav.lng - safeLng) < 0.0001
@@ -1095,7 +1292,7 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
         </div>
       </div>
       <div class="safety-label" style="color: ${scoreColor}">${level.icon} ${level.label}</div>
-      <div class="zone-name">${escapeHtml(areaInfo.name)} • ${formatTime(currentHour)}</div>
+      <div class="zone-name">${escapeHtml(areaInfo.name)} • ${formatTime(normalizedHour)}</div>
       <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">${escapeHtml(areaInfo.area || '')}</div>
 
       <button class="favorite-btn ${isFavorite ? 'active' : ''}" onclick="toggleFavorite(${safeLat}, ${safeLng}, '${safeAreaName}')" aria-label="${isFavorite ? 'Remove' : 'Save'} location ${escapeHtml(areaInfo.name)}">
@@ -1104,6 +1301,42 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
       <button class="route-now-btn" onclick="startDirectionsTo(${safeLat}, ${safeLng}, '${safeAreaName}')" aria-label="Get turn-by-turn directions to ${escapeHtml(areaInfo.name)}">
         🧭 Directions Here
       </button>
+    </div>
+
+    <div class="section">
+      <div class="section-title"><span class="icon">🧭</span> Safety Snapshot</div>
+      <div class="snapshot-card ${level.class}">
+        <div class="snapshot-header">
+          <div>
+            <div class="snapshot-title">${escapeHtml(level.label)} outlook</div>
+            <div class="snapshot-meta">Updated ${escapeHtml(updatedAt)} • ${escapeHtml(areaInfo.name)}</div>
+          </div>
+          <div class="snapshot-confidence ${confidenceTone.className}">
+            <strong>${escapeHtml(confidenceTone.label)}</strong>
+            <span>${riskReliability !== null ? `${riskReliability}% reliability` : 'Model confidence signal'}</span>
+          </div>
+        </div>
+
+        <div class="snapshot-outlook-grid">
+          ${safetyOutlook.map((windowItem) => `
+            <div class="snapshot-outlook-tile ${windowItem.stateClass}">
+              <div class="outlook-window">${escapeHtml(windowItem.label)}</div>
+              <div class="outlook-score">${windowItem.score}</div>
+              <div class="outlook-meta">${escapeHtml(windowItem.deltaLabel)}</div>
+            </div>
+          `).join('')}
+        </div>
+
+        <div class="snapshot-list">
+          ${snapshotReasons.map((reason) => `<div class="snapshot-list-item">${escapeHtml(reason)}</div>`).join('')}
+        </div>
+
+        ${snapshotActions.length > 0 ? `
+          <div class="snapshot-chips">
+            ${snapshotActions.map((action) => `<span class="snapshot-chip">${escapeHtml(action)}</span>`).join('')}
+          </div>
+        ` : ''}
+      </div>
     </div>
 
     <div class="section">
@@ -1136,6 +1369,59 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
         ${usesProxyRisk ? '<div style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">Using civic proxy signals for areas without official open crime APIs.</div>' : ''}
       </div>
     ` : ''}
+
+    <div class="section">
+      <div class="section-title"><span class="icon">🚑</span> Emergency Readiness</div>
+      <div class="readiness-card ${readinessSummary.className}">
+        <div class="readiness-header">
+          <div>
+            <div class="readiness-label">${escapeHtml(readinessSummary.label)}</div>
+            <div class="readiness-description">${escapeHtml(readinessSummary.summary)}</div>
+          </div>
+          <div class="readiness-score">${readinessSummary.score}/100</div>
+        </div>
+
+        <div class="readiness-metrics">
+          <div class="readiness-metric">
+            <div class="metric-name">Police Reach</div>
+            <div class="metric-value">${nearestPolice ? escapeHtml(formatDistance(Number(nearestPolice.distance || 0))) : 'Not found'}</div>
+          </div>
+          <div class="readiness-metric">
+            <div class="metric-name">Hospital Reach</div>
+            <div class="metric-value">${nearestHospital ? escapeHtml(formatDistance(Number(nearestHospital.distance || 0))) : 'Not found'}</div>
+          </div>
+          <div class="readiness-metric">
+            <div class="metric-name">Fire Reach</div>
+            <div class="metric-value">${nearestFire ? escapeHtml(formatDistance(Number(nearestFire.distance || 0))) : 'Not found'}</div>
+          </div>
+        </div>
+
+        <div class="readiness-metrics single-line">
+          <div class="readiness-metric">
+            <div class="metric-name">Active Cameras</div>
+            <div class="metric-value">${activeCams.length}</div>
+          </div>
+          <div class="readiness-metric">
+            <div class="metric-name">Travel Time</div>
+            <div class="metric-value">${formatTime(normalizedHour)}</div>
+          </div>
+          <div class="readiness-metric">
+            <div class="metric-name">Emergency Number</div>
+            <div class="metric-value">${escapeHtml(nums.unified || nums.police || 'Unavailable')}</div>
+          </div>
+        </div>
+
+        <div class="readiness-actions">
+          ${emergencyDial ? `<a class="readiness-btn emergency" href="tel:${escapeHtml(emergencyDial)}" aria-label="Call emergency number ${escapeHtml(nums.unified || nums.police || emergencyDial)}">Call Emergency</a>` : `<button class="readiness-btn emergency disabled" disabled aria-disabled="true">Call Emergency</button>`}
+          <button class="readiness-btn secondary" onclick="openEmergencyContacts()" aria-label="Open emergency contacts">Alert Contacts</button>
+          ${nearestHospital && nearestHospitalLat !== null && nearestHospitalLng !== null ? `<button class="readiness-btn neutral" onclick="startDirectionsTo(${nearestHospitalLat}, ${nearestHospitalLng}, '${nearestHospitalName}')" aria-label="Route to nearest hospital ${escapeHtml(nearestHospital.name || 'nearest hospital')}">Route to Hospital</button>` : ''}
+        </div>
+
+        <div class="readiness-checklist">
+          ${readinessChecklist.map((item) => `<div class="checklist-item">- ${escapeHtml(item)}</div>`).join('')}
+        </div>
+      </div>
+    </div>
 
     <div class="section">
       <div class="section-title"><span class="icon">📍</span> Location</div>

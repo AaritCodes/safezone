@@ -39,7 +39,44 @@ jobs:
       - name: Evaluate governance status
         if: steps.config.outputs.enabled == 'true'
         run: |
-          node -e "const fs=require('fs'); const report=JSON.parse(fs.readFileSync('governance-report.json','utf8')); const status=((report||{}).report||{}).status||'unknown'; console.log('governance status:', status); if(status==='requires_action'){ process.exit(1);}"
+          node <<'NODE'
+          const fs = require('fs');
+
+          const payload = JSON.parse(fs.readFileSync('governance-report.json', 'utf8'));
+          const report = (payload || {}).report || {};
+          const status = String(report.status || 'unknown');
+          const severity = String(report.severity || 'warning');
+          const incidentClass = String(report.incidentClass || 'unknown');
+          const staleInference = Boolean(report.freshness && report.freshness.inferenceStale);
+          const recommendations = Array.isArray(report.recommendations)
+            ? report.recommendations.slice(0, 3)
+            : [];
+
+          console.log('governance status:', status);
+          console.log('governance severity:', severity);
+          console.log('governance incident class:', incidentClass);
+
+          if (recommendations.length > 0) {
+            console.log('top recommendations:');
+            for (const item of recommendations) {
+              console.log(`- ${item}`);
+            }
+          }
+
+          if (staleInference) {
+            console.error('::error::Governance inference telemetry is stale. Investigate pipeline ingestion.');
+            process.exit(1);
+          }
+
+          if (status === 'requires_action') {
+            console.error('::error::Governance status is requires_action. Block model promotion and investigate drift/calibration.');
+            process.exit(1);
+          }
+
+          if (status === 'monitoring') {
+            console.log('::warning::Governance status is monitoring. Proceed with review and model-owner approval only.');
+          }
+          NODE
 
       - name: Upload governance report artifact
         if: steps.config.outputs.enabled == 'true'

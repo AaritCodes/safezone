@@ -111,6 +111,61 @@ function buildReadiness(config) {
   };
 }
 
+function toFiniteNumber(value, fallback = 0) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+function countServices(services) {
+  const source = services && typeof services === 'object' ? services : {};
+  const police = Array.isArray(source.police) ? source.police.length : 0;
+  const hospital = Array.isArray(source.hospital) ? source.hospital.length : 0;
+  const fire = Array.isArray(source.fire) ? source.fire.length : 0;
+  return police + hospital + fire;
+}
+
+function buildGovernanceInferenceEvent(payload, inference, scoring, traceContext, defaultModelVersion) {
+  const cv = inference && inference.cv && typeof inference.cv === 'object'
+    ? inference.cv
+    : {};
+  const sceneRisk = cv.sceneRisk && typeof cv.sceneRisk === 'object'
+    ? cv.sceneRisk
+    : {};
+
+  const safetyScore = Math.max(0, Math.min(100, toFiniteNumber(scoring && scoring.score, 50)));
+  const riskProbability = Math.max(0, Math.min(1, (100 - safetyScore) / 100));
+
+  const publicRisk = payload && payload.publicRisk && typeof payload.publicRisk === 'object'
+    ? payload.publicRisk
+    : {};
+
+  return {
+    timestamp: new Date().toISOString(),
+    traceId: traceContext && traceContext.traceId ? traceContext.traceId : '',
+    modelVersion: scoring && scoring.model
+      ? String(scoring.model)
+      : (cv.modelVersion ? String(cv.modelVersion) : String(defaultModelVersion || 'unknown')),
+    sourceMode: inference && inference.sourceMode ? String(inference.sourceMode) : 'unknown',
+    sceneRiskScore: toFiniteNumber(sceneRisk.score, 0),
+    detectionCount: Array.isArray(cv.detections) ? cv.detections.length : 0,
+    sceneConfidence: toFiniteNumber(sceneRisk.confidence, 0),
+    predictionScore: Math.round((1 - riskProbability) * 100),
+    predictedProbability: riskProbability,
+    inferenceLatencyMs: toFiniteNumber(inference && inference.inferenceLatencyMs, 0),
+    inputSummary: {
+      hour: toFiniteNumber(payload && payload.hour, new Date().getHours()),
+      areaType: payload && payload.areaInfo && payload.areaInfo.type ? String(payload.areaInfo.type) : 'unknown',
+      areaCategory: payload && payload.areaInfo && payload.areaInfo.category ? String(payload.areaInfo.category) : 'unknown',
+      serviceCount: countServices(payload && payload.services),
+      cameraCount: Array.isArray(payload && payload.cameras) ? payload.cameras.length : 0,
+      publicRiskSignals: toFiniteNumber(publicRisk.theftCount, 0) +
+        toFiniteNumber(publicRisk.violentCount, 0) +
+        toFiniteNumber(publicRisk.accidentHotspots, 0) +
+        toFiniteNumber(publicRisk.conflictPoints, 0)
+    }
+  };
+}
+
 function createApp(runtime = {}) {
   const config = runtime.config || readConfig();
   const logger = runtime.logger || createLogger({
@@ -319,9 +374,27 @@ function createApp(runtime = {}) {
   });
 
   app.get('/api/governance/report', (req, res) => {
+    const report = governance.getReport();
+
+    if (alerting && typeof alerting.observeGovernance === 'function') {
+      Promise.resolve(alerting.observeGovernance(report)).catch((error) => {
+        req.log.error('governance.alert_observation_failed', { error });
+      });
+    }
+
     res.json({
       status: 'ok',
-      report: governance.getReport(),
+      report,
+      generatedAt: new Date().toISOString(),
+      requestId: req.requestId,
+      traceId: req.traceContext && req.traceContext.traceId
+    });
+  });
+
+  app.get('/api/governance/manifest', (req, res) => {
+    res.json({
+      status: 'ok',
+      manifest: governance.getManifest(),
       generatedAt: new Date().toISOString(),
       requestId: req.requestId,
       traceId: req.traceContext && req.traceContext.traceId
@@ -331,6 +404,7 @@ function createApp(runtime = {}) {
   app.post('/api/governance/labels', createPayloadValidationMiddleware(validateGovernanceLabelPayload, metrics), (req, res) => {
     const payload = req.validatedPayload;
     const result = governance.recordGroundTruth(payload);
+    metrics.noteGovernanceLabel(Boolean(result && result.accepted));
     const statusCode = result.accepted ? 202 : 503;
 
     res.status(statusCode).json({
@@ -347,8 +421,7 @@ function createApp(runtime = {}) {
     const inference = await analyzeCvScene(payload, {
       config: config.cv,
       logger: req.log || logger,
-      traceContext: req.traceContext,
-      governance
+      traceContext: req.traceContext
     });
 
     const cv = inference.cv;
@@ -356,6 +429,21 @@ function createApp(runtime = {}) {
       ...payload,
       cv
     });
+
+    const governanceEvent = buildGovernanceInferenceEvent(payload, inference, scoring, req.traceContext, config.cv.modelVersion);
+    const governanceIngestion = governance.recordInference(governanceEvent);
+
+    if (governanceIngestion && typeof governanceIngestion.accepted === 'boolean') {
+      metrics.noteGovernanceInference(governanceIngestion.accepted);
+
+      if (!governanceIngestion.accepted) {
+        (req.log || logger).warn('governance.inference_not_ingested', {
+          reasons: governanceIngestion.reasons,
+          missingFields: governanceIngestion.missingFields,
+          nullRate: governanceIngestion.nullRate
+        });
+      }
+    }
 
     res.json({
       status: 'ok',
@@ -370,6 +458,17 @@ function createApp(runtime = {}) {
         latencyMs: inference.inferenceLatencyMs,
         modelVersion: cv && cv.modelVersion ? cv.modelVersion : config.cv.modelVersion
       },
+      governance: governanceIngestion && typeof governanceIngestion.accepted === 'boolean'
+        ? {
+            ingested: governanceIngestion.accepted,
+            reasons: Array.isArray(governanceIngestion.reasons) ? governanceIngestion.reasons : [],
+            nullRate: Number(governanceIngestion.nullRate || 0)
+          }
+        : {
+            ingested: false,
+            reasons: ['governance_disabled_or_unavailable'],
+            nullRate: 0
+          },
       generatedAt: new Date().toISOString(),
       requestId: req.requestId,
       traceId: req.traceContext && req.traceContext.traceId

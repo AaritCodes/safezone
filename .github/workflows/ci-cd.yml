@@ -94,10 +94,32 @@ jobs:
             -e SAFEZONE_TRACING_ENABLED=true \
             "$IMAGE_NAME:${{ needs.build_image.outputs.image_tag }}"
 
+      - name: Wait for backend container health
+        run: |
+          for i in $(seq 1 45); do
+            status=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}starting{{end}}' safezone-smoke)
+            echo "Attempt $i: container health=$status"
+
+            if [ "$status" = "healthy" ]; then
+              exit 0
+            fi
+
+            if [ "$status" = "unhealthy" ]; then
+              docker logs safezone-smoke || true
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          echo "Container did not become healthy in time"
+          docker logs safezone-smoke || true
+          exit 1
+
       - name: Health and readiness checks
         run: |
-          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://localhost:8787/api/health
-          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://localhost:8787/api/readiness
+          curl --fail --show-error --silent --retry 10 --retry-connrefused --retry-all-errors --retry-delay 1 http://localhost:8787/api/health
+          curl --fail --show-error --silent --retry 10 --retry-connrefused --retry-all-errors --retry-delay 1 http://localhost:8787/api/readiness
 
       - name: Analyze endpoint smoke check
         run: |
@@ -105,6 +127,12 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{"lat":12.9716,"lng":77.5946,"hour":21,"areaInfo":{"type":"commercial","category":"market"},"services":{"police":[],"hospital":[],"fire":[]},"cameras":[],"publicRisk":{"theftCount":2,"violentCount":1,"accidentHotspots":1,"conflictPoints":1,"reliabilityScore":80,"confidence":"high"}}' \
             http://localhost:8787/api/safety/analyze
+
+      - name: Dump smoke container logs on failure
+        if: failure()
+        run: |
+          docker ps -a
+          docker logs safezone-smoke || true
 
       - name: Stop smoke container
         if: always()

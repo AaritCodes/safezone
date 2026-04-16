@@ -7,6 +7,10 @@ const MAP_CENTER = [28.6139, 77.2090];
 const MAP_ZOOM = 13;
 const GOOGLE_API_KEY = '';
 const GOOGLE_API_KEY_META_NAME = 'safezone-google-api-key';
+const BACKEND_BASE_URL = '';
+const BACKEND_BASE_URL_META_NAME = 'safezone-backend-base-url';
+const BACKEND_API_KEY = '';
+const BACKEND_API_KEY_META_NAME = 'safezone-backend-api-key';
 
 function normalizeGoogleApiKey(value) {
   const raw = String(value || '').trim();
@@ -52,6 +56,132 @@ function getGoogleApiKey() {
 function hasGoogleApiKey() {
   const key = getGoogleApiKey();
   return Boolean(key && key.length > 20);
+}
+
+function normalizeBackendBaseUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+
+  if (/^https?:\/\//i.test(raw)) {
+    return raw.replace(/\/$/, '');
+  }
+
+  if (raw.startsWith('/')) {
+    return raw.replace(/\/$/, '');
+  }
+
+  return '';
+}
+
+function readBackendBaseUrlFromMetaTag() {
+  if (typeof document === 'undefined' || typeof document.querySelector !== 'function') {
+    return '';
+  }
+
+  const meta = document.querySelector(`meta[name="${BACKEND_BASE_URL_META_NAME}"]`);
+  if (!meta) return '';
+
+  const content = String(meta.getAttribute('content') || '').trim();
+  return normalizeBackendBaseUrl(content);
+}
+
+function getBackendBaseUrl() {
+  if (typeof window !== 'undefined' && typeof window.SAFEZONE_BACKEND_BASE_URL === 'string') {
+    const fromWindow = normalizeBackendBaseUrl(window.SAFEZONE_BACKEND_BASE_URL);
+    if (fromWindow) return fromWindow;
+  }
+
+  const fromMeta = readBackendBaseUrlFromMetaTag();
+  if (fromMeta) return fromMeta;
+
+  return normalizeBackendBaseUrl(BACKEND_BASE_URL);
+}
+
+function buildBackendApiUrl(path) {
+  const baseUrl = getBackendBaseUrl();
+  const cleanedPath = String(path || '').trim();
+  if (!baseUrl || !cleanedPath) return '';
+
+  if (baseUrl.startsWith('/')) {
+    return `${baseUrl}${cleanedPath.startsWith('/') ? cleanedPath : `/${cleanedPath}`}`;
+  }
+
+  return `${baseUrl}${cleanedPath.startsWith('/') ? cleanedPath : `/${cleanedPath}`}`;
+}
+
+function normalizeBackendApiKey(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+
+  if (/^your[_\s-]?backend[_\s-]?api[_\s-]?key$/i.test(raw)) {
+    return '';
+  }
+
+  if (!/^[A-Za-z0-9._-]{10,256}$/.test(raw)) {
+    return '';
+  }
+
+  return raw;
+}
+
+function readBackendApiKeyFromMetaTag() {
+  if (typeof document === 'undefined' || typeof document.querySelector !== 'function') {
+    return '';
+  }
+
+  const meta = document.querySelector(`meta[name="${BACKEND_API_KEY_META_NAME}"]`);
+  if (!meta) return '';
+
+  const content = String(meta.getAttribute('content') || '').trim();
+  return normalizeBackendApiKey(content);
+}
+
+function getBackendApiKey() {
+  if (typeof window !== 'undefined' && typeof window.SAFEZONE_BACKEND_API_KEY === 'string') {
+    const fromWindow = normalizeBackendApiKey(window.SAFEZONE_BACKEND_API_KEY);
+    if (fromWindow) return fromWindow;
+  }
+
+  const fromMeta = readBackendApiKeyFromMetaTag();
+  if (fromMeta) return fromMeta;
+
+  return normalizeBackendApiKey(BACKEND_API_KEY);
+}
+
+async function fetchBackendSafetyAssessment(payload = {}, timeoutMs = 5200) {
+  const endpoint = buildBackendApiUrl('/api/safety/analyze');
+  if (!endpoint) return null;
+
+  const backendApiKey = getBackendApiKey();
+  const headers = {
+    'Content-Type': 'application/json'
+  };
+
+  if (backendApiKey) {
+    headers['x-api-key'] = backendApiKey;
+  }
+
+  try {
+    const response = await fetchWithTimeout(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload || {})
+    }, timeoutMs);
+
+    if (!response.ok) {
+      throw new Error(`Backend API returned ${response.status}`);
+    }
+
+    const data = await parseGoogleJsonResponse(response);
+    if (!data || typeof data !== 'object' || !data.scoring) {
+      return null;
+    }
+
+    return data;
+  } catch (err) {
+    console.warn('Product-grade backend scoring unavailable, using local model:', err);
+    return null;
+  }
 }
 
 let googleMapsLoaded = false;
@@ -1910,8 +2040,141 @@ async function fetchPublicSafetyRisk(lat, lng) {
   }
 }
 
+function mergeRiskDataWithBackendAssessment(riskData = {}, backendResponse = null) {
+  if (!backendResponse || typeof backendResponse !== 'object') {
+    return riskData;
+  }
+
+  const baseRisk = riskData && typeof riskData === 'object' ? riskData : {};
+  const scoring = backendResponse.scoring && typeof backendResponse.scoring === 'object'
+    ? backendResponse.scoring
+    : {};
+  const cv = backendResponse.cv && typeof backendResponse.cv === 'object'
+    ? backendResponse.cv
+    : {};
+  const sceneRisk = cv.sceneRisk && typeof cv.sceneRisk === 'object'
+    ? cv.sceneRisk
+    : {};
+  const deploymentReadiness = scoring.deploymentReadiness && typeof scoring.deploymentReadiness === 'object'
+    ? scoring.deploymentReadiness
+    : null;
+
+  const backendScore = Number(scoring.score);
+  const backendPenalty = Math.max(0, Math.round(Number(scoring.penalty || 0)));
+  const confidenceScore = Number(scoring.confidenceScore);
+  const cvConfidenceRaw = Number(sceneRisk.confidence);
+  const cvQuality = Number.isFinite(cvConfidenceRaw)
+    ? Number((clampRiskValue(cvConfidenceRaw, 0, 1) * 100).toFixed(1))
+    : null;
+
+  const backendFactors = Array.isArray(scoring.factors)
+    ? scoring.factors
+      .map(value => String(value || '').trim())
+      .filter(Boolean)
+      .slice(0, 8)
+    : [];
+  const existingFactors = Array.isArray(baseRisk.factors) ? baseRisk.factors : [];
+  const mergedFactors = [];
+  const seenFactors = new Set();
+
+  [...backendFactors, ...existingFactors].forEach((value) => {
+    const normalized = String(value || '').trim();
+    if (!normalized) return;
+    if (seenFactors.has(normalized)) return;
+    seenFactors.add(normalized);
+    mergedFactors.push(normalized);
+  });
+
+  const recommendations = Array.isArray(backendResponse.recommendations)
+    ? backendResponse.recommendations.slice(0, 6).map(item => String(item || '').trim()).filter(Boolean)
+    : (Array.isArray(scoring.recommendations)
+      ? scoring.recommendations.slice(0, 6).map(item => String(item || '').trim()).filter(Boolean)
+      : []);
+
+  const existingSources = baseRisk.sources && typeof baseRisk.sources === 'object' ? baseRisk.sources : {};
+  const existingDataQuality = baseRisk.dataQuality && typeof baseRisk.dataQuality === 'object' ? baseRisk.dataQuality : {};
+
+  const merged = {
+    ...baseRisk,
+    penalty: Math.max(Number(baseRisk.penalty || 0), backendPenalty),
+    confidence: String(scoring.confidence || baseRisk.confidence || 'low'),
+    reliabilityScore: Number.isFinite(confidenceScore)
+      ? Number(confidenceScore.toFixed(1))
+      : Number(baseRisk.reliabilityScore || 0),
+    factors: mergedFactors.length ? mergedFactors : existingFactors,
+    productAssessment: {
+      model: String(scoring.model || 'safezone-product-risk-v1'),
+      score: Number.isFinite(backendScore) ? Math.round(clampRiskValue(backendScore, 0, 100)) : null,
+      penalty: backendPenalty,
+      confidence: String(scoring.confidence || baseRisk.confidence || 'low'),
+      confidenceScore: Number.isFinite(confidenceScore) ? Number(confidenceScore.toFixed(1)) : null,
+      factors: backendFactors,
+      recommendations,
+      deploymentReadiness
+    },
+    cvSignals: {
+      provider: String(cv.provider || 'yolov8-sim-coco'),
+      level: String(sceneRisk.level || 'low'),
+      score: Number.isFinite(Number(sceneRisk.score))
+        ? Math.round(clampRiskValue(Number(sceneRisk.score), 0, 100))
+        : 0,
+      confidence: Number.isFinite(cvConfidenceRaw)
+        ? Number((clampRiskValue(cvConfidenceRaw, 0, 1) * 100).toFixed(1))
+        : 0,
+      detections: Array.isArray(cv.detections) ? cv.detections.length : 0,
+      objectCounts: sceneRisk.objectCounts && typeof sceneRisk.objectCounts === 'object'
+        ? sceneRisk.objectCounts
+        : {},
+      signals: Array.isArray(sceneRisk.signals)
+        ? sceneRisk.signals.slice(0, 4).map(item => String(item || '').trim()).filter(Boolean)
+        : []
+    },
+    recommendations,
+    sources: {
+      ...existingSources,
+      cv: String(cv.provider || 'yolov8-sim-coco')
+    },
+    dataQuality: {
+      ...existingDataQuality,
+      ...(cvQuality !== null ? { cv: cvQuality } : {})
+    }
+  };
+
+  return merged;
+}
+
 // ── Dynamic Safety Score Algorithm (Enhanced) ─────────────────
 function calculateSafetyScore(hour, services, cameras, areaInfo, riskData = null) {
+  if (
+    riskData &&
+    riskData.productAssessment &&
+    Number.isFinite(Number(riskData.productAssessment.score))
+  ) {
+    const product = riskData.productAssessment;
+    const score = clampRiskValue(Number(product.score), 0, 100);
+    const productFactors = Array.isArray(product.factors) ? product.factors.slice(0, 8) : [];
+    const productPenalty = Math.max(0, Math.round(Number(product.penalty || 0)));
+
+    if (productPenalty > 0) {
+      productFactors.push(`-${productPenalty} (backend multi-signal risk penalty)`);
+    }
+
+    if (riskData.cvSignals && Number.isFinite(Number(riskData.cvSignals.score))) {
+      productFactors.push(
+        `CV scene risk: ${Math.round(Number(riskData.cvSignals.score || 0))}/100 (${String(riskData.cvSignals.level || 'low')})`
+      );
+    }
+
+    if (productFactors.length === 0) {
+      productFactors.push('Product-grade backend risk model score');
+    }
+
+    return {
+      score: Math.round(score),
+      factors: productFactors
+    };
+  }
+
   let score = 50; // Base score
   let factors = []; // Track what influenced the score
 
@@ -2125,6 +2388,33 @@ function generateRiskFactors(hour, services, cameras, areaInfo, riskData = null)
     if (riskData.accidentHotspots > 0) risks.push(`${riskData.accidentHotspots} mapped road hazard points nearby`);
     if (riskData.conflictPoints > 0) risks.push(`${riskData.conflictPoints} dense traffic-conflict nodes nearby`);
 
+    if (riskData.cvSignals) {
+      const cvScore = Math.round(Number(riskData.cvSignals.score || 0));
+      const cvLevel = String(riskData.cvSignals.level || 'low').toLowerCase();
+      const detections = Math.round(Number(riskData.cvSignals.detections || 0));
+
+      if (cvScore >= 65 || cvLevel === 'high' || cvLevel === 'critical') {
+        risks.push(`CV anomaly pressure is elevated (${cvScore}/100)`);
+      } else if (cvScore >= 38 || cvLevel === 'moderate') {
+        risks.push(`CV scene shows moderate anomaly pressure (${cvScore}/100)`);
+      } else {
+        features.push(`CV scene analysis indicates stable local dynamics (${cvScore}/100)`);
+      }
+
+      if (detections > 0) {
+        features.push(`YOLOv8 simulation processed ${detections} scene detections`);
+      }
+
+      if (Array.isArray(riskData.cvSignals.signals) && riskData.cvSignals.signals.length > 0) {
+        riskData.cvSignals.signals.slice(0, 2).forEach((signal) => {
+          const safeSignal = String(signal || '').trim();
+          if (!safeSignal) return;
+          if (cvScore >= 55) risks.push(safeSignal);
+          else features.push(safeSignal);
+        });
+      }
+    }
+
     if ((riskData.confidence === 'high' || riskData.confidence === 'medium') && (riskData.penalty || 0) === 0) {
       features.push('Low pressure from recent public incident feeds');
     }
@@ -2137,6 +2427,14 @@ function generateRiskFactors(hour, services, cameras, areaInfo, riskData = null)
       features.push('Using proxy public-incident signals for this region');
     } else if (riskData.confidence === 'low') {
       risks.push('Limited official public incident coverage for this location');
+    }
+
+    if (riskData.productAssessment && Array.isArray(riskData.productAssessment.recommendations)) {
+      riskData.productAssessment.recommendations.slice(0, 2).forEach((recommendation) => {
+        const text = String(recommendation || '').trim();
+        if (!text) return;
+        features.push(text);
+      });
     }
   }
 
@@ -2876,10 +3174,12 @@ if (typeof module !== 'undefined' && module.exports) {
     getCrimeSignalReliability,
     trainRiskModel,
     calculateSafetyScore,
+    mergeRiskDataWithBackendAssessment,
     normalizeRouteOptimizationMode,
     predictRouteCongestion,
     optimizeRouteAlternatives,
     getGoogleApiKey,
-    hasGoogleApiKey
+    hasGoogleApiKey,
+    getBackendApiKey
   };
 }

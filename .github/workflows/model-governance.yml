@@ -1,0 +1,37 @@
+name: SafeZone Model Governance Monitor
+
+on:
+  schedule:
+    - cron: '30 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  governance_check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch governance report
+        env:
+          SAFEZONE_BACKEND_URL: ${{ secrets.SAFEZONE_BACKEND_URL }}
+          SAFEZONE_API_KEY: ${{ secrets.SAFEZONE_API_KEY }}
+        run: |
+          if [ -z "$SAFEZONE_BACKEND_URL" ] || [ -z "$SAFEZONE_API_KEY" ]; then
+            echo "SAFEZONE_BACKEND_URL and SAFEZONE_API_KEY secrets are required"
+            exit 1
+          fi
+
+          curl --fail --show-error --silent \
+            -H "x-api-key: $SAFEZONE_API_KEY" \
+            "$SAFEZONE_BACKEND_URL/api/governance/report" > governance-report.json
+
+      - name: Evaluate governance status
+        run: |
+          node -e "const fs=require('fs'); const report=JSON.parse(fs.readFileSync('governance-report.json','utf8')); const status=((report||{}).report||{}).status||'unknown'; console.log('governance status:', status); if(status==='requires_action'){ process.exit(1);}"
+
+      - name: Upload governance report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: governance-report
+          path: governance-report.json

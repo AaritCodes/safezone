@@ -197,6 +197,8 @@ function formatIncidentSourceLabel(source) {
     'india-police-karnataka': 'Karnataka Police crime feed',
     'osm-civic-risk-proxy': 'OpenStreetMap civic risk proxy',
     'model-derived-risk-proxy': 'Model-derived civic proxy',
+    'yolov8-sim-coco': 'YOLOv8 simulated CV feed',
+    'safezone-product-risk-v1': 'Product-grade backend risk engine',
     'crime-feed-error': 'Crime feed temporary error',
     'public-crime-feed-unavailable': 'Regional crime feed unavailable',
     'osm-road-signals': 'OpenStreetMap road hazard feed',
@@ -353,6 +355,16 @@ async function loadAreaData(lat, lng) {
   const propsP = fetchNearbyProperties(lat, lng, 2000).then(r => { properties = r; updatePropertyMarkers(properties); }).catch(e => { console.warn('Properties:', e); });
   const geoP = reverseGeocode(lat, lng).then(r => { areaInfo = r; }).catch(e => { console.warn('Geocode:', e); hasApiErrors = true; });
   const riskP = fetchPublicSafetyRisk(lat, lng).then(r => { riskData = r; if (r && r.criticalError) hasApiErrors = true; updateRiskMarkers(riskData); }).catch(e => { console.warn('Risk:', e); hasApiErrors = true; });
+  const backendAssessmentP = Promise.allSettled([servicesP, camerasP, geoP, riskP])
+    .then(() => enrichRiskDataWithBackendAssessment(lat, lng, currentHour, services, cameras, areaInfo, riskData))
+    .then((enriched) => {
+      if (!enriched || typeof enriched !== 'object') return;
+      riskData = enriched;
+      updateRiskMarkers(riskData);
+    })
+    .catch((err) => {
+      console.warn('Backend assessment:', err);
+    });
 
   // Hard deadline: after 5 seconds, render whatever we have
   const deadline = new Promise(resolve => setTimeout(resolve, 5000));
@@ -379,6 +391,12 @@ async function loadAreaData(lat, lng) {
     lastFetchedProperties = properties;
     lastAreaInfo = areaInfo;
     lastRiskData = riskData;
+    updateHeatmap();
+  });
+
+  Promise.allSettled([backendAssessmentP]).then(() => {
+    lastRiskData = riskData;
+    updateRiskMarkers(riskData);
     updateHeatmap();
   });
 
@@ -671,6 +689,70 @@ function withTimeoutFallback(promise, timeoutMs, fallbackValue, label = 'request
   });
 }
 
+function compactServicePayload(services, key, limit = 6) {
+  const list = services && Array.isArray(services[key]) ? services[key] : [];
+  return list.slice(0, limit).map((item, index) => ({
+    id: item && item.id ? String(item.id) : `${key}_${index + 1}`,
+    distance: Math.max(0, Number(item && item.distance || 0)),
+    status: item && item.status ? String(item.status) : undefined
+  }));
+}
+
+function buildBackendSafetyPayload(lat, lng, hour, services, cameras, areaInfo, riskData) {
+  const normalizedHour = Number.isFinite(Number(hour)) ? Number(hour) : new Date().getHours();
+  const cameraArray = Array.isArray(cameras) ? cameras : (cameras && Array.isArray(cameras.cameras) ? cameras.cameras : []);
+
+  return {
+    lat,
+    lng,
+    hour: normalizedHour,
+    areaInfo: {
+      name: String(areaInfo && areaInfo.name || 'Selected location'),
+      type: String(areaInfo && areaInfo.type || 'unknown'),
+      category: String(areaInfo && areaInfo.category || 'unknown')
+    },
+    services: {
+      police: compactServicePayload(services, 'police', 8),
+      hospital: compactServicePayload(services, 'hospital', 8),
+      fire: compactServicePayload(services, 'fire', 6)
+    },
+    cameras: cameraArray.slice(0, 20).map((camera, index) => ({
+      id: camera && camera.id ? String(camera.id) : `camera_${index + 1}`,
+      status: String(camera && camera.status || 'unknown'),
+      coverage: Math.max(0, Number(camera && camera.coverage || 0)),
+      distance: Math.max(0, Number(camera && camera.distance || 0))
+    })),
+    publicRisk: {
+      theftCount: Math.max(0, Number(riskData && riskData.theftCount || 0)),
+      violentCount: Math.max(0, Number(riskData && riskData.violentCount || 0)),
+      accidentHotspots: Math.max(0, Number(riskData && riskData.accidentHotspots || 0)),
+      conflictPoints: Math.max(0, Number(riskData && riskData.conflictPoints || 0)),
+      reliabilityScore: Number(riskData && riskData.reliabilityScore || 0),
+      confidence: String(riskData && riskData.confidence || 'low')
+    }
+  };
+}
+
+async function enrichRiskDataWithBackendAssessment(lat, lng, hour, services, cameras, areaInfo, riskData) {
+  if (typeof fetchBackendSafetyAssessment !== 'function' || typeof mergeRiskDataWithBackendAssessment !== 'function') {
+    return riskData;
+  }
+
+  const payload = buildBackendSafetyPayload(lat, lng, hour, services, cameras, areaInfo, riskData);
+  const backendAssessment = await withTimeoutFallback(
+    fetchBackendSafetyAssessment(payload),
+    5400,
+    null,
+    'Backend product-grade scoring'
+  );
+
+  if (!backendAssessment) {
+    return riskData;
+  }
+
+  return mergeRiskDataWithBackendAssessment(riskData, backendAssessment);
+}
+
 // ── Map Click Handler ─────────────────────────────────────────
 async function onMapClick(e) {
   const { lat, lng } = e.latlng;
@@ -823,6 +905,18 @@ async function onMapClick(e) {
       scanHadErrors = true;
     });
 
+    const backendAssessmentP = Promise.allSettled([servicesP, camerasP, geocodeP, riskP])
+      .then(() => enrichRiskDataWithBackendAssessment(lat, lng, currentHour, services, cameras, areaInfo, riskData))
+      .then((enriched) => {
+        if (!enriched || typeof enriched !== 'object') return;
+        riskData = enriched;
+        if (requestId !== activeScanRequestId) return;
+        updateRiskMarkers(riskData);
+      })
+      .catch((err) => {
+        console.warn('Backend assessment failed during scan:', err);
+      });
+
     const allFetches = [servicesP, camerasP, propertiesP, geocodeP, riskP];
     const completedBeforeDeadline = await Promise.race([
       Promise.allSettled(allFetches).then(() => true),
@@ -852,7 +946,7 @@ async function onMapClick(e) {
       showNotification('⚠️ Some feeds are slow or unavailable. Showing best available estimates.', 'warning', 5000);
     }
 
-    Promise.allSettled(allFetches).then(() => {
+    Promise.allSettled([...allFetches, backendAssessmentP]).then(() => {
       if (requestId !== activeScanRequestId) return;
 
       hasApiErrors = scanHadErrors;
@@ -942,6 +1036,27 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
   const accidentQuality = riskData && riskData.dataQuality && Number.isFinite(Number(riskData.dataQuality.accidents))
     ? Math.round(Number(riskData.dataQuality.accidents))
     : null;
+  const cvQuality = riskData && riskData.dataQuality && Number.isFinite(Number(riskData.dataQuality.cv))
+    ? Math.round(Number(riskData.dataQuality.cv))
+    : null;
+  const cvSourceLabel = riskData && riskData.sources
+    ? formatIncidentSourceLabel(riskData.sources.cv)
+    : 'Unavailable';
+  const cvRiskScore = riskData && riskData.cvSignals && Number.isFinite(Number(riskData.cvSignals.score))
+    ? Math.round(Number(riskData.cvSignals.score))
+    : null;
+  const cvRiskLevel = riskData && riskData.cvSignals
+    ? String(riskData.cvSignals.level || 'low')
+    : 'low';
+  const productScore = riskData && riskData.productAssessment && Number.isFinite(Number(riskData.productAssessment.score))
+    ? Math.round(Number(riskData.productAssessment.score))
+    : null;
+  const productModel = riskData && riskData.productAssessment
+    ? String(riskData.productAssessment.model || 'safezone-product-risk-v1')
+    : '';
+  const deploymentGrade = riskData && riskData.productAssessment && riskData.productAssessment.deploymentReadiness
+    ? String(riskData.productAssessment.deploymentReadiness.grade || '')
+    : '';
   const usesProxyRisk = Boolean(riskData && riskData.sources && (
     String(riskData.sources.crime || '').includes('proxy') ||
     String(riskData.sources.accidents || '').includes('proxy')
@@ -1014,7 +1129,10 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
         <div style="font-size: 11px; color: var(--text-muted); line-height: 1.5;">
           Confidence: ${escapeHtml(riskData.confidence || 'low')} • Crime source: ${escapeHtml(crimeSourceLabel)} • Accident source: ${escapeHtml(accidentSourceLabel)}
         </div>
-        ${riskReliability !== null ? `<div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Estimated data reliability: ${riskReliability}%${crimeQuality !== null ? ` • Crime quality ${crimeQuality}%` : ''}${accidentQuality !== null ? ` • Accident quality ${accidentQuality}%` : ''}</div>` : ''}
+        ${riskReliability !== null ? `<div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Estimated data reliability: ${riskReliability}%${crimeQuality !== null ? ` • Crime quality ${crimeQuality}%` : ''}${accidentQuality !== null ? ` • Accident quality ${accidentQuality}%` : ''}${cvQuality !== null ? ` • CV quality ${cvQuality}%` : ''}</div>` : ''}
+        ${productScore !== null ? `<div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Product-grade score: ${productScore}/100 via ${escapeHtml(productModel)}${deploymentGrade ? ` • ${escapeHtml(deploymentGrade)}` : ''}</div>` : ''}
+        ${cvRiskScore !== null ? `<div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">YOLOv8 simulated CV risk: ${cvRiskScore}/100 (${escapeHtml(cvRiskLevel)}) • CV source: ${escapeHtml(cvSourceLabel)}</div>` : ''}
+        ${riskData && Array.isArray(riskData.recommendations) && riskData.recommendations.length > 0 ? `<div style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">Recommendation: ${escapeHtml(riskData.recommendations[0])}</div>` : ''}
         ${usesProxyRisk ? '<div style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">Using civic proxy signals for areas without official open crime APIs.</div>' : ''}
       </div>
     ` : ''}

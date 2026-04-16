@@ -1,0 +1,8 @@
+{
+  "metrics": {
+    "sceneRiskScore": [0.10, 0.20, 0.35, 0.25, 0.10],
+    "detectionCount": [0.25, 0.35, 0.25, 0.10, 0.05],
+    "sceneConfidence": [0.05, 0.15, 0.35, 0.30, 0.15]
+  },
+  "notes": "Baseline distributions for drift monitoring. Update after model promotion with validated production windows."
+}

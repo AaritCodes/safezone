@@ -11,7 +11,8 @@ const {
   calculateSafetyScore,
   optimizeRouteAlternatives,
   getGoogleApiKey,
-  hasGoogleApiKey
+  hasGoogleApiKey,
+  getBackendApiKey
 } = require('./data.js');
 
 const {
@@ -19,6 +20,32 @@ const {
   isSafeCacheableResponse,
   isCacheableShellRequest
 } = require('./sw.js');
+
+const {
+  simulateYolov8Scene
+} = require('./backend/yolov8-sim.js');
+
+const {
+  scoreSafetyContext
+} = require('./backend/risk-engine.js');
+
+const {
+  analyzeCvScene,
+  inferEffectiveMode
+} = require('./backend/yolov8-inference.js');
+
+const {
+  parseTraceparent,
+  buildTraceparent
+} = require('./backend/middleware/tracing.js');
+
+const {
+  createModelGovernance
+} = require('./backend/model-governance.js');
+
+const {
+  createAlertManager
+} = require('./backend/alerting.js');
 
 describe('SafeZone Production Logic', () => {
   describe('Risk Core: getDistanceDecayWeight', () => {
@@ -226,6 +253,261 @@ describe('SafeZone Production Logic', () => {
 
       expect(getGoogleApiKey()).toBe('');
       expect(hasGoogleApiKey()).toBe(false);
+    });
+  });
+
+  describe('Security behavior: backend key handling', () => {
+    afterEach(() => {
+      delete global.window;
+      delete global.document;
+    });
+
+    test('does not report backend API key by default', () => {
+      expect(getBackendApiKey()).toBe('');
+    });
+
+    test('accepts valid SAFEZONE_BACKEND_API_KEY from window', () => {
+      global.window = { SAFEZONE_BACKEND_API_KEY: 'safezone_backend_key_1234567890' };
+      expect(getBackendApiKey()).toBe('safezone_backend_key_1234567890');
+    });
+
+    test('rejects malformed backend key from window', () => {
+      global.window = { SAFEZONE_BACKEND_API_KEY: 'key<script>alert(1)</script>' };
+      expect(getBackendApiKey()).toBe('');
+    });
+
+    test('falls back to backend key meta tag', () => {
+      global.window = {};
+      global.document = {
+        querySelector: jest.fn((selector) => {
+          if (selector === 'meta[name="safezone-backend-api-key"]') {
+            return {
+              getAttribute: jest.fn(() => 'safezone_backend_meta_0987654321')
+            };
+          }
+          return null;
+        })
+      };
+
+      expect(getBackendApiKey()).toBe('safezone_backend_meta_0987654321');
+    });
+  });
+
+  describe('Backend product-grade scoring', () => {
+    test('YOLOv8 simulation is deterministic for same scene input', () => {
+      const input = {
+        lat: 12.9716,
+        lng: 77.5946,
+        hour: 22,
+        areaInfo: { type: 'commercial', category: 'market' },
+        services: {
+          police: [{ distance: 640 }],
+          hospital: [{ distance: 880 }],
+          fire: [{ distance: 1200 }]
+        },
+        cameras: [
+          { status: 'active', coverage: 130, distance: 180 },
+          { status: 'active', coverage: 120, distance: 260 }
+        ],
+        publicRisk: {
+          theftCount: 6,
+          violentCount: 2,
+          accidentHotspots: 3,
+          conflictPoints: 4,
+          reliabilityScore: 78,
+          confidence: 'high'
+        }
+      };
+
+      const first = simulateYolov8Scene(input);
+      const second = simulateYolov8Scene(input);
+
+      expect(first.frameId).toBe(second.frameId);
+      expect(first.sceneRisk.score).toBe(second.sceneRisk.score);
+      expect(first.detections.length).toBe(second.detections.length);
+    });
+
+    test('risk engine penalizes severe public+cv context more than protected context', () => {
+      const protectedContext = {
+        hour: 11,
+        services: {
+          police: [{ distance: 220 }],
+          hospital: [{ distance: 380 }],
+          fire: [{ distance: 600 }]
+        },
+        cameras: [
+          { status: 'active', coverage: 160 },
+          { status: 'active', coverage: 140 },
+          { status: 'active', coverage: 120 }
+        ],
+        publicRisk: {
+          theftCount: 0,
+          violentCount: 0,
+          accidentHotspots: 1,
+          conflictPoints: 1,
+          reliabilityScore: 84,
+          confidence: 'high'
+        },
+        cv: {
+          provider: 'yolov8-sim-coco',
+          detections: [{}, {}, {}],
+          sceneRisk: {
+            score: 18,
+            level: 'low',
+            confidence: 0.88,
+            signals: []
+          }
+        }
+      };
+
+      const severeContext = {
+        hour: 2,
+        services: {
+          police: [{ distance: 2800 }],
+          hospital: [{ distance: 3200 }],
+          fire: []
+        },
+        cameras: [
+          { status: 'maintenance', coverage: 90 }
+        ],
+        publicRisk: {
+          theftCount: 12,
+          violentCount: 5,
+          accidentHotspots: 6,
+          conflictPoints: 7,
+          reliabilityScore: 66,
+          confidence: 'medium'
+        },
+        cv: {
+          provider: 'yolov8-sim-coco',
+          detections: [{}, {}, {}, {}, {}, {}, {}],
+          sceneRisk: {
+            score: 81,
+            level: 'critical',
+            confidence: 0.73,
+            signals: ['Loitering concentration observed in frame']
+          }
+        }
+      };
+
+      const protectedScore = scoreSafetyContext(protectedContext);
+      const severeScore = scoreSafetyContext(severeContext);
+
+      expect(severeScore.score).toBeLessThan(protectedScore.score);
+      expect(severeScore.penalty).toBeGreaterThan(protectedScore.penalty);
+    });
+  });
+
+  describe('Backend inference provider', () => {
+    const samplePayload = {
+      lat: 12.9716,
+      lng: 77.5946,
+      hour: 20,
+      areaInfo: { type: 'commercial', category: 'market' },
+      services: { police: [], hospital: [], fire: [] },
+      cameras: [],
+      publicRisk: {
+        theftCount: 2,
+        violentCount: 1,
+        accidentHotspots: 1,
+        conflictPoints: 1,
+        reliabilityScore: 70,
+        confidence: 'high'
+      }
+    };
+
+    test('auto mode resolves to remote when endpoint exists', () => {
+      expect(inferEffectiveMode({ mode: 'auto', endpoint: 'http://localhost:9999/infer' })).toBe('remote');
+    });
+
+    test('falls back to simulation when remote inference fails', async () => {
+      const result = await analyzeCvScene(samplePayload, {
+        config: {
+          mode: 'remote',
+          endpoint: 'http://127.0.0.1:1/infer',
+          timeoutMs: 150,
+          fallbackToSimulation: true,
+          modelVersion: 'yolov8-sim-v1'
+        },
+        logger: {
+          error: jest.fn(),
+          warn: jest.fn()
+        }
+      });
+
+      expect(result.sourceMode).toBe('simulation');
+      expect(result.degraded).toBe(true);
+      expect(result.cv.sceneRisk).toBeDefined();
+    });
+  });
+
+  describe('Tracing and governance utilities', () => {
+    test('parses and rebuilds traceparent header values', () => {
+      const raw = '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01';
+      const parsed = parseTraceparent(raw);
+
+      expect(parsed.traceId).toBe('4bf92f3577b34da6a3ce929d0e0e4736');
+      expect(parsed.parentSpanId).toBe('00f067aa0ba902b7');
+      expect(buildTraceparent(parsed.traceId, '0123456789abcdef', parsed.traceFlags))
+        .toBe('00-4bf92f3577b34da6a3ce929d0e0e4736-0123456789abcdef-01');
+    });
+
+    test('governance report evaluates calibration after enough labels', () => {
+      const governance = createModelGovernance({
+        minLabelsForCalibration: 2,
+        driftPsiThreshold: 0.2,
+        calibrationBrierThreshold: 0.3
+      }, {
+        info: jest.fn()
+      });
+
+      governance.recordInference({
+        modelVersion: 'yolov8-remote-v1',
+        sourceMode: 'remote',
+        sceneRiskScore: 42,
+        detectionCount: 8,
+        sceneConfidence: 0.72
+      });
+
+      governance.recordGroundTruth({
+        predictedProbability: 0.8,
+        incidentOccurred: true,
+        modelVersion: 'yolov8-remote-v1'
+      });
+
+      governance.recordGroundTruth({
+        predictedProbability: 0.1,
+        incidentOccurred: false,
+        modelVersion: 'yolov8-remote-v1'
+      });
+
+      const report = governance.getReport();
+      expect(report.calibration.status).toBe('evaluated');
+      expect(report.sampleCounts.labels).toBe(2);
+    });
+  });
+
+  describe('Alerting window evaluation', () => {
+    test('computes rolling error and latency stats', async () => {
+      const alerting = createAlertManager({
+        enabled: false,
+        windowMs: 60000,
+        minRequestCount: 2,
+        errorRateThreshold: 0.1,
+        p95LatencyMsThreshold: 250,
+        cooldownMs: 0
+      }, {
+        warn: jest.fn(),
+        error: jest.fn()
+      });
+
+      await alerting.observeRequest({ statusCode: 200, durationMs: 120, route: '/api/safety/analyze' });
+      await alerting.observeRequest({ statusCode: 503, durationMs: 320, route: '/api/safety/analyze' });
+
+      const status = alerting.getStatus();
+      expect(status.windowStats.sampleSize).toBe(2);
+      expect(status.windowStats.errorRate).toBeGreaterThan(0);
+      expect(status.windowStats.p95LatencyMs).toBeGreaterThanOrEqual(320);
     });
   });
 });

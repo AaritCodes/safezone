@@ -29,6 +29,8 @@ SafeZone is a comprehensive web application that provides real-time safety analy
 - **⭐ Favorite Locations**: Save frequently checked locations
 - **📊 Score Breakdown**: Transparent calculation showing all factors
 - **🔔 Smart Notifications**: Real-time feedback for all actions
+- **🧠 Backend YOLOv8 Simulation**: Deterministic CV scene detections via backend API
+- **🧩 Product-Grade Risk Engine**: Multi-signal fusion (infrastructure + time + incidents + CV)
 - **🌍 30+ Countries**: Emergency numbers for countries worldwide
 - **♿ Accessibility**: Full ARIA support and keyboard navigation
 - **⚡ Performance**: Caching and throttling for optimal speed
@@ -56,6 +58,22 @@ SafeZone is a comprehensive web application that provides real-time safety analy
 - No installation or build process required!
 
 ### Running the Application
+
+#### Option 0: Product-Grade Backend Mode (Recommended)
+```bash
+npm install
+npm run start
+```
+
+Then open your browser at:
+```
+http://localhost:8787
+```
+
+This mode enables:
+- YOLOv8 simulation CV API endpoints
+- Backend risk fusion scoring for product-grade calibration
+- Static app hosting from the same backend service
 
 #### Option 1: Direct File Opening
 1. Download or clone this repository
@@ -223,6 +241,28 @@ Supports 30+ countries including:
 
 ```
 safezone/
+├── backend/
+│   ├── config.js            # Environment-driven backend configuration
+│   ├── logger.js            # Structured JSON logger utility
+│   ├── metrics.js           # In-memory request/error metrics store
+│   ├── alerting.js          # SLO threshold evaluation and webhook alerts
+│   ├── model-governance.js  # Drift and calibration governance loop
+│   ├── validation.js        # Request payload validation and sanitization
+│   ├── yolov8-inference.js  # Configurable remote/simulated CV inference adapter
+│   ├── middleware/
+│   │   ├── auth.js          # API key and metrics token guards
+│   │   ├── rate-limit.js    # In-memory API rate limiting middleware
+│   │   └── tracing.js       # W3C trace context middleware
+│   ├── model-baselines/
+│   │   └── default-baseline.json # Governance baseline distributions
+│   ├── server.js            # Express backend API + static hosting
+│   ├── yolov8-sim.js        # YOLOv8-style CV simulation engine
+│   └── risk-engine.js       # Product-grade risk fusion engine
+├── .env.example             # Production backend environment template
+├── .dockerignore            # Container build ignore rules
+├── Dockerfile               # Containerized backend deployment
+├── .github/workflows        # CI/CD, promotion, rollback, governance checks
+├── docs/                    # SLO runbooks and governance procedures
 ├── index.html              # Main HTML structure
 ├── style.css               # Primary UI styling
 ├── edge-ai.css             # Edge AI UI styling
@@ -310,6 +350,104 @@ Security notes:
 - Restrict key usage by HTTP referrer in Google Cloud Console
 - Enable only the APIs you actually use (Geocoding, Directions, Geolocation)
 - Rotate keys immediately if they were previously committed
+
+### Backend API Base URL (Optional)
+
+SafeZone can call a backend API for product-grade risk scoring and YOLOv8 simulation CV.
+
+Priority order for backend URL:
+1. `window.SAFEZONE_BACKEND_BASE_URL`
+2. `<meta name="safezone-backend-base-url" content="...">`
+3. `BACKEND_BASE_URL` constant in `data.js`
+
+Example:
+```html
+<meta name="safezone-backend-base-url" content="http://localhost:8787">
+```
+
+Notes:
+- If this value is empty, SafeZone continues using local scoring logic.
+- When app and backend are served from the same origin, point this to that origin.
+
+### Backend API Key (Optional but Recommended)
+
+When backend auth is enabled, SafeZone sends `x-api-key` to backend APIs.
+
+Priority order for backend API key:
+1. `window.SAFEZONE_BACKEND_API_KEY`
+2. `<meta name="safezone-backend-api-key" content="...">`
+3. `BACKEND_API_KEY` constant in `data.js`
+
+Example:
+```html
+<meta name="safezone-backend-api-key" content="replace-with-backend-api-key">
+```
+
+Security notes:
+- Never commit real backend API keys to source control
+- Rotate keys periodically and after any suspected leakage
+- Use separate keys for frontend calls and operational tooling
+
+### Product-Grade Backend Deployment
+
+SafeZone backend now includes:
+- API key auth for analysis routes
+- Request payload validation and sanitization
+- Per-IP rate limiting with standard rate-limit headers
+- Structured request logging with request correlation IDs
+- W3C trace propagation (`traceparent`) with `X-Trace-Id` correlation
+- Configurable YOLOv8 provider mode: `simulation`, `remote`, or `auto` fallback
+- SLO-aware alerting (`/api/ops/alerts`) and live SLO snapshot (`/api/ops/slo`)
+- Model governance APIs (`/api/governance/report`, `/api/governance/labels`)
+- Health (`/api/health`), readiness (`/api/readiness`), and Prometheus metrics (`/api/metrics`) endpoints
+
+Configuration is environment-driven via `.env.example`:
+
+```bash
+cp .env.example .env
+```
+
+Key production variables:
+- `SAFEZONE_AUTH_REQUIRED=true`
+- `SAFEZONE_API_KEYS=comma-separated-secure-keys`
+- `SAFEZONE_CORS_ORIGINS=https://your-frontend.example.com`
+- `SAFEZONE_RATE_LIMIT_WINDOW_MS=60000`
+- `SAFEZONE_RATE_LIMIT_MAX_REQUESTS=120`
+- `SAFEZONE_METRICS_TOKEN=secure-metrics-token`
+- `SAFEZONE_LOG_LEVEL=info`
+- `SAFEZONE_TRACING_ENABLED=true`
+- `SAFEZONE_CV_MODE=auto`
+- `SAFEZONE_CV_ENDPOINT=https://your-inference-service.example.com/infer`
+- `SAFEZONE_ALERTING_ENABLED=true`
+- `SAFEZONE_ALERTING_WEBHOOK_URL=https://your-alerts.example.com/hooks/safezone`
+- `SAFEZONE_GOVERNANCE_ENABLED=true`
+- `SAFEZONE_GOVERNANCE_MIN_DRIFT_SAMPLES=100`
+
+Metrics endpoint security:
+- If `SAFEZONE_METRICS_TOKEN` is set, call `/api/metrics` with header `x-metrics-token`.
+
+Container deployment:
+```bash
+npm run docker:build
+npm run docker:run
+```
+
+Health verification:
+```bash
+curl http://localhost:8787/api/health
+curl http://localhost:8787/api/readiness
+```
+
+Ops verification:
+```bash
+curl -H "x-api-key: <safezone-key>" http://localhost:8787/api/ops/slo
+curl -H "x-api-key: <safezone-key>" http://localhost:8787/api/governance/report
+```
+
+Operational references:
+- SLOs and incident runbooks: `docs/SLO_RUNBOOKS.md`
+- Model governance lifecycle: `docs/MODEL_GOVERNANCE.md`
+- Promotion and rollback pipeline: `docs/DEPLOYMENT_PROMOTION_AND_ROLLBACK.md`
 
 ### Adjusting Cache Duration
 Edit `data.js`:

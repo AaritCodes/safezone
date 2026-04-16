@@ -1,0 +1,165 @@
+name: SafeZone CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      promote_to_production:
+        description: Promote to production after staging checks
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: safezone-cicd-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: safezone
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Run audit
+        run: npm audit --audit-level=high
+
+  build_image:
+    needs: quality
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: meta
+        run: echo "image_tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Docker image
+        run: docker build -t "$IMAGE_NAME:${{ steps.meta.outputs.image_tag }}" .
+
+      - name: Save image artifact
+        run: docker save "$IMAGE_NAME:${{ steps.meta.outputs.image_tag }}" > safezone-image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: safezone-image
+          path: safezone-image.tar
+
+  staging_smoke:
+    needs: build_image
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: safezone-image
+
+      - name: Load image
+        run: docker load < safezone-image.tar
+
+      - name: Run backend container for smoke tests
+        run: |
+          docker run -d --rm --name safezone-smoke -p 8787:8787 \
+            -e NODE_ENV=production \
+            -e SAFEZONE_AUTH_REQUIRED=false \
+            -e SAFEZONE_CV_MODE=simulation \
+            -e SAFEZONE_TRACING_ENABLED=true \
+            "$IMAGE_NAME:${{ needs.build_image.outputs.image_tag }}"
+
+      - name: Health and readiness checks
+        run: |
+          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://localhost:8787/api/health
+          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://localhost:8787/api/readiness
+
+      - name: Analyze endpoint smoke check
+        run: |
+          curl --fail --show-error --silent \
+            -H "Content-Type: application/json" \
+            -d '{"lat":12.9716,"lng":77.5946,"hour":21,"areaInfo":{"type":"commercial","category":"market"},"services":{"police":[],"hospital":[],"fire":[]},"cameras":[],"publicRisk":{"theftCount":2,"violentCount":1,"accidentHotspots":1,"conflictPoints":1,"reliabilityScore":80,"confidence":"high"}}' \
+            http://localhost:8787/api/safety/analyze
+
+      - name: Stop smoke container
+        if: always()
+        run: docker stop safezone-smoke || true
+
+  promote_production:
+    needs: [build_image, staging_smoke]
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.promote_to_production == true)
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Optional governance gate
+        env:
+          SAFEZONE_BACKEND_URL: ${{ secrets.SAFEZONE_BACKEND_URL }}
+          SAFEZONE_API_KEY: ${{ secrets.SAFEZONE_API_KEY }}
+        run: |
+          if [ -z "$SAFEZONE_BACKEND_URL" ] || [ -z "$SAFEZONE_API_KEY" ]; then
+            echo "SAFEZONE_BACKEND_URL / SAFEZONE_API_KEY not configured, skipping governance gate"
+            exit 0
+          fi
+
+          curl --fail --show-error --silent \
+            -H "x-api-key: $SAFEZONE_API_KEY" \
+            "$SAFEZONE_BACKEND_URL/api/governance/report" > governance-gate.json
+
+          node -e "const fs=require('fs');const payload=JSON.parse(fs.readFileSync('governance-gate.json','utf8'));const status=((payload||{}).report||{}).status||'unknown';console.log('governance gate status:', status);if(status==='requires_action'){process.exit(1);}"
+
+      - name: Prepare deployment payload
+        run: |
+          echo "Promoting image tag ${{ needs.build_image.outputs.image_tag }} to production"
+
+      - name: Notify deployment system
+        env:
+          DEPLOY_WEBHOOK: ${{ secrets.SAFEZONE_DEPLOY_WEBHOOK_URL }}
+          DEPLOY_TOKEN: ${{ secrets.SAFEZONE_DEPLOY_WEBHOOK_TOKEN }}
+        run: |
+          if [ -z "$DEPLOY_WEBHOOK" ]; then
+            echo "SAFEZONE_DEPLOY_WEBHOOK_URL is not configured; skipping external deploy trigger"
+            exit 0
+          fi
+
+          AUTH_HEADER=""
+          if [ -n "$DEPLOY_TOKEN" ]; then
+            AUTH_HEADER="-H Authorization: Bearer $DEPLOY_TOKEN"
+          fi
+
+          curl --fail --show-error --silent -X POST "$DEPLOY_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            $AUTH_HEADER \
+            -d '{"service":"safezone","imageTag":"${{ needs.build_image.outputs.image_tag }}","sha":"${{ github.sha }}","environment":"production"}'
+
+  rollback_hint:
+    needs: [build_image, staging_smoke, promote_production]
+    if: failure() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print rollback instructions
+        run: |
+          echo "A deployment stage failed. Trigger workflow 'SafeZone Rollback' with a previous stable image tag."

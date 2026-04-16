@@ -220,13 +220,13 @@ describe('SafeZone Production Logic', () => {
     });
 
     test('accepts a valid SAFEZONE_GOOGLE_API_KEY from window', () => {
-      global.window = { SAFEZONE_GOOGLE_API_KEY: 'AIzaSyA123456789012345678901234567890AB' };
-      expect(getGoogleApiKey()).toBe('AIzaSyA123456789012345678901234567890AB');
+      global.window = { SAFEZONE_GOOGLE_API_KEY: 'safezone_google_key_valid_1234567890AB' };
+      expect(getGoogleApiKey()).toBe('safezone_google_key_valid_1234567890AB');
       expect(hasGoogleApiKey()).toBe(true);
     });
 
     test('rejects malformed keys from window', () => {
-      global.window = { SAFEZONE_GOOGLE_API_KEY: 'AIzaSyA1234567890<script>alert(1)</script>' };
+      global.window = { SAFEZONE_GOOGLE_API_KEY: 'safezone_google_key<script>alert(1)</script>' };
       expect(getGoogleApiKey()).toBe('');
       expect(hasGoogleApiKey()).toBe(false);
     });
@@ -235,11 +235,11 @@ describe('SafeZone Production Logic', () => {
       global.window = {};
       global.document = {
         querySelector: jest.fn(() => ({
-          getAttribute: jest.fn(() => 'AIzaSyB123456789012345678901234567890CD')
+          getAttribute: jest.fn(() => 'safezone_google_meta_key_1234567890CD')
         }))
       };
 
-      expect(getGoogleApiKey()).toBe('AIzaSyB123456789012345678901234567890CD');
+      expect(getGoogleApiKey()).toBe('safezone_google_meta_key_1234567890CD');
       expect(hasGoogleApiKey()).toBe(true);
     });
 

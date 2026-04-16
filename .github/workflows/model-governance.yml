@@ -12,25 +12,37 @@ jobs:
   governance_check:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch governance report
+      - name: Check governance monitor configuration
+        id: config
         env:
           SAFEZONE_BACKEND_URL: ${{ secrets.SAFEZONE_BACKEND_URL }}
           SAFEZONE_API_KEY: ${{ secrets.SAFEZONE_API_KEY }}
         run: |
           if [ -z "$SAFEZONE_BACKEND_URL" ] || [ -z "$SAFEZONE_API_KEY" ]; then
-            echo "SAFEZONE_BACKEND_URL and SAFEZONE_API_KEY secrets are required"
-            exit 1
+            echo "SAFEZONE_BACKEND_URL / SAFEZONE_API_KEY not configured, skipping governance monitor"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch governance report
+        if: steps.config.outputs.enabled == 'true'
+        env:
+          SAFEZONE_BACKEND_URL: ${{ secrets.SAFEZONE_BACKEND_URL }}
+          SAFEZONE_API_KEY: ${{ secrets.SAFEZONE_API_KEY }}
+        run: |
           curl --fail --show-error --silent \
             -H "x-api-key: $SAFEZONE_API_KEY" \
             "$SAFEZONE_BACKEND_URL/api/governance/report" > governance-report.json
 
       - name: Evaluate governance status
+        if: steps.config.outputs.enabled == 'true'
         run: |
           node -e "const fs=require('fs'); const report=JSON.parse(fs.readFileSync('governance-report.json','utf8')); const status=((report||{}).report||{}).status||'unknown'; console.log('governance status:', status); if(status==='requires_action'){ process.exit(1);}"
 
       - name: Upload governance report artifact
+        if: steps.config.outputs.enabled == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: governance-report

@@ -1,3 +1,20 @@
+// ============================================================
+// SafeZone — Deterministic Scene Simulation Engine
+//
+// IMPORTANT: This module produces deterministic scene detections
+// in COCO-class format (person, car, truck, etc.). It does NOT
+// run any neural network or computer vision inference.
+//
+// Outputs are derived from:
+//   - Location context (area type, infrastructure proximity)
+//   - Time-of-day visibility/population models
+//   - Nearby incident pressure from public feeds
+//   - Seeded PRNG for reproducible scene generation
+//
+// The output format mirrors YOLOv8 detection schemas so that
+// downstream consumers can switch to real inference without
+// changing their data contract.
+// ============================================================
 'use strict';
 
 function clamp(value, min, max) {

@@ -29,8 +29,8 @@ SafeZone is a comprehensive web application that provides real-time safety analy
 - **⭐ Favorite Locations**: Save frequently checked locations
 - **📊 Score Breakdown**: Transparent calculation showing all factors
 - **🔔 Smart Notifications**: Real-time feedback for all actions
-- **🧠 Backend YOLOv8 Simulation**: Deterministic CV scene detections via backend API
-- **🧩 Product-Grade Risk Engine**: Multi-signal fusion (infrastructure + time + incidents + CV)
+- **🧠 Deterministic Scene Simulation**: COCO-class format scene detections via backend API (not real CV inference)
+- **🧩 Multi-Signal Risk Engine**: Infrastructure + time + incidents + published crime rates (NCRB)
 - **🌍 30+ Countries**: Emergency numbers for countries worldwide
 - **♿ Accessibility**: Full ARIA support and keyboard navigation
 - **⚡ Performance**: Caching and throttling for optimal speed
@@ -166,6 +166,7 @@ The safety score (0-100) is calculated based on:
 | Time of Day | -30 to +10 | Hour-based risk assessment |
 | Area Type | -12 to +8 | Residential, commercial, etc. |
 | Service Density | ±5 | Overall emergency service coverage |
+| **NCRB Crime Rate** | **-25 to +12** | **Published IPC crime rate vs national avg** |
 
 **Score Ranges:**
 - 🟢 **80-100**: Very Safe
@@ -186,7 +187,8 @@ The safety score (0-100) is calculated based on:
 ### 2. Safety Heatmap
 - **Dynamic Generation**: Changes based on time of day
 - **Risk Visualization**: Red = high risk, Green = low risk
-- **Estimated Patterns**: Not based on actual crime data
+- **Estimated Patterns**: Generated algorithmically based on time of day — not actual crime data
+- **Not Predictive**: Visualizes estimated risk patterns, cannot predict actual incidents
 - **Cached Performance**: 5-minute cache for smooth interactions
 
 ### 3. Emergency Services
@@ -248,7 +250,7 @@ safezone/
 │   ├── alerting.js          # SLO threshold evaluation and webhook alerts
 │   ├── model-governance.js  # Drift and calibration governance loop
 │   ├── validation.js        # Request payload validation and sanitization
-│   ├── yolov8-inference.js  # Configurable remote/simulated CV inference adapter
+│   ├── yolov8-inference.js  # Configurable remote/deterministic scene adapter
 │   ├── middleware/
 │   │   ├── auth.js          # API key and metrics token guards
 │   │   ├── rate-limit.js    # In-memory API rate limiting middleware
@@ -256,8 +258,8 @@ safezone/
 │   ├── model-baselines/
 │   │   └── default-baseline.json # Governance baseline distributions
 │   ├── server.js            # Express backend API + static hosting
-│   ├── yolov8-sim.js        # YOLOv8-style CV simulation engine
-│   └── risk-engine.js       # Product-grade risk fusion engine
+│   ├── yolov8-sim.js        # Deterministic scene simulation engine (COCO-class output format)
+│   └── risk-engine.js       # Multi-signal risk fusion engine
 ├── .env.example             # Production backend environment template
 ├── .dockerignore            # Container build ignore rules
 ├── Dockerfile               # Containerized backend deployment
@@ -268,7 +270,8 @@ safezone/
 ├── edge-ai.css             # Edge AI UI styling
 ├── app.js                  # Core application logic
 ├── data.js                 # Data fetching and scoring algorithms
-├── edge-ai.js              # Local sensor fusion logic
+├── edge-ai.js              # On-device sensor fusion (microphone + accelerometer)
+├── ncrb-data.js            # NCRB published crime rates (23 states, 20 cities)
 ├── sw.js                   # Service worker shell caching
 ├── tests.js                # Jest test suite
 ├── manifest.json           # PWA metadata
@@ -388,15 +391,17 @@ Security notes:
 - Rotate keys periodically and after any suspected leakage
 - Use separate keys for frontend calls and operational tooling
 
-### Product-Grade Backend Deployment
+### Backend Infrastructure (Learning/Demo)
 
-SafeZone backend now includes:
+The backend includes production-grade infrastructure patterns implemented as a **learning exercise**. These patterns are real and functional but are applied to a simulated inference pipeline and distance-based scoring algorithm — not a production ML system.
+
+**Implemented patterns:**
 - API key auth for analysis routes
 - Request payload validation and sanitization
 - Per-IP rate limiting with standard rate-limit headers
 - Structured request logging with request correlation IDs
 - W3C trace propagation (`traceparent`) with `X-Trace-Id` correlation
-- Configurable YOLOv8 provider mode: `simulation`, `remote`, or `auto` fallback
+- Configurable scene simulation provider mode: `simulation`, `remote`, or `auto` fallback
 - SLO-aware alerting (`/api/ops/alerts`) and live SLO snapshot (`/api/ops/slo`)
 - Model governance APIs (`/api/governance/report`, `/api/governance/labels`)
 - Health (`/api/health`), readiness (`/api/readiness`), and Prometheus metrics (`/api/metrics`) endpoints
@@ -523,6 +528,14 @@ npx jest tests.js --runInBand
    - Routing -> OSRM
    - Approximate location -> map center fallback
 - **Handled errors**: 401, 403, 429, request timeout, and service/network failures
+
+### NCRB (National Crime Records Bureau)
+- **Purpose**: Published IPC crime rates per lakh population for Indian states and cities
+- **Data Source**: "Crime in India" 2022-2023 annual reports
+- **Coverage**: 23 states/UTs, 20 metropolitan cities
+- **Website**: `https://ncrb.gov.in`
+- **Usage**: City → state → national average fallback for safety scoring
+- **Important**: Rates reflect *registered* FIRs — higher rates may indicate better police reporting infrastructure
 
 ### Leaflet.js
 - **Purpose**: Interactive map rendering
@@ -666,7 +679,8 @@ When APIs are unavailable:
 - **Not comprehensive**: Cannot account for all risks
 
 ### Heatmap
-- **Simulated data**: Not based on actual crime statistics
+- **Algorithmically generated**: Not based on actual crime statistics — uses time-of-day patterns
+- **Visual representation**: Shows estimated risk patterns for educational purposes
 - **Visual representation**: Shows estimated risk patterns
 - **Time-based**: Changes with time of day
 - **Not predictive**: Cannot predict actual incidents
@@ -812,7 +826,7 @@ SOFTWARE.
 - [ ] Share safety reports
 
 ### Version 3.0 (Future)
-- [ ] Real crime data integration
+- [ ] Real-time crime data API integration (beyond NCRB static rates)
 - [ ] Mobile app (React Native)
 - [ ] Offline mode
 - [ ] Multi-language support
@@ -822,6 +836,18 @@ SOFTWARE.
 ---
 
 ## 📈 Changelog
+
+### Version 2.2 (NCRB + Terminology Update)
+- ✅ Integrated NCRB Crime in India 2023 published crime rates (23 states, 20 cities)
+- ✅ Added NCRB crime statistics card to sidebar with per-lakh breakdowns
+- ✅ Safety score now factors in real published crime rates relative to national average
+- ✅ Fixed misleading terminology: "Edge AI" → "On-Device Sensor Fusion"
+- ✅ Fixed misleading terminology: "YOLOv8 Simulation" → "Deterministic Scene Simulation"
+- ✅ Made safety score methodology transparent in sidebar disclaimer
+- ✅ Added data quality caveat about FIR registration rates
+- ✅ Removed node_modules from version control
+- ✅ Reframed backend ops infrastructure as learning exercise in docs
+- ✅ Updated heatmap legend with explicit "not crime data" disclaimer
 
 ### Version 2.1 (Security + Testing Update)
 - ✅ Expanded and documented risk-engine test coverage in `tests.js`
@@ -865,4 +891,4 @@ SOFTWARE.
 
 **Built with ❤️ for safer communities worldwide**
 
-*Last Updated: April 15, 2026*
+*Last Updated: April 26, 2026*

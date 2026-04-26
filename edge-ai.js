@@ -1,6 +1,11 @@
 // ============================================================
-// SafeZone — Edge AI Sensor Fusion Module
-// Local, Privacy-Preserving Machine Learning Simulation
+// SafeZone — On-Device Sensor Fusion Module
+// Local, Privacy-Preserving Browser Sensor Processing
+//
+// This module uses the Web Audio API (microphone RMS level) and
+// DeviceMotion API (accelerometer magnitude) to detect anomalous
+// environmental conditions. It does NOT run any ML model inference.
+// The "anomaly score" is a rule-based threshold on sensor readings.
 // ============================================================
 
 const EdgeAI = (function() {
@@ -58,10 +63,10 @@ const EdgeAI = (function() {
       
       processAudio();
     } catch (err) {
-      console.warn("Edge AI: Microphone access denied or unavailable.", err);
+      console.warn("Sensor Guardian: Microphone access denied or unavailable.", err);
       // Fallback or alert user
       if (typeof showNotification === 'function') {
-        showNotification("Microphone access denied. Audio AI disabled.", "warning");
+        showNotification("Microphone access denied. Audio monitoring disabled.", "warning");
       }
     }
   }
@@ -89,7 +94,7 @@ const EdgeAI = (function() {
     if (wasLoud !== loudNoiseDetected) {
       triggerUpdate();
       if (loudNoiseDetected && typeof showNotification === 'function') {
-        showNotification("⚠️ Edge AI Detected: Unusual Audio Spike", "warning");
+        showNotification("⚠️ Sensor Guardian: Unusual Audio Spike Detected", "warning");
       }
     }
     
@@ -130,7 +135,7 @@ const EdgeAI = (function() {
             if (permissionState === 'granted') {
               window.addEventListener('devicemotion', handleMotion, false);
             } else {
-              console.warn("Edge AI: Motion sensor permission denied.");
+              console.warn("Sensor Guardian: Motion sensor permission denied.");
             }
           })
           .catch(console.error);
@@ -139,7 +144,7 @@ const EdgeAI = (function() {
         window.addEventListener('devicemotion', handleMotion, false);
       }
     } else {
-      console.warn("Edge AI: Device motion not supported on this device/browser.");
+      console.warn("Sensor Guardian: Device motion not supported on this device/browser.");
     }
   }
   
@@ -175,7 +180,7 @@ const EdgeAI = (function() {
     if (wasRapid !== rapidMotionDetected) {
       triggerUpdate();
       if (rapidMotionDetected && typeof showNotification === 'function') {
-         showNotification("⚠️ Edge AI Detected: Rapid Acceleration/Fall", "warning");
+         showNotification("⚠️ Sensor Guardian: Rapid Acceleration/Fall Detected", "warning");
       }
     }
   }
@@ -208,14 +213,14 @@ const EdgeAI = (function() {
         stopAudioProcessing();
         stopMotionProcessing();
         if (typeof showNotification === 'function') {
-          showNotification("🛡️ Edge AI Disengaged", "info");
+          showNotification("🛡️ Sensor Guardian Disengaged", "info");
         }
       } else {
         isActive = true;
         await startAudioProcessing();
         startMotionProcessing();
         if (typeof showNotification === 'function') {
-          showNotification("🛡️ Edge AI Guardian Active (Privacy Ensured)", "success");
+          showNotification("🛡️ Sensor Guardian Active (Privacy Ensured)", "success");
         }
       }
       triggerUpdate();

@@ -2144,7 +2144,7 @@ function mergeRiskDataWithBackendAssessment(riskData = {}, backendResponse = nul
 }
 
 // ── Dynamic Safety Score Algorithm (Enhanced) ─────────────────
-function calculateSafetyScore(hour, services, cameras, areaInfo, riskData = null) {
+function calculateSafetyScore(hour, services, cameras, areaInfo, riskData = null, coords = null) {
   if (
     riskData &&
     riskData.productAssessment &&
@@ -2304,15 +2304,15 @@ function calculateSafetyScore(hour, services, cameras, areaInfo, riskData = null
     factors.push('-5 (low service density)');
   }
 
-  // Factor 9: Edge AI Local Anomaly (Microphone / Accelerometer)
+  // Factor 9: On-Device Sensor Guardian (Microphone / Accelerometer)
   if (typeof EdgeAI !== 'undefined' && EdgeAI.isActive()) {
     const edgeAnomaly = EdgeAI.getAnomalyScore();
     if (edgeAnomaly > 0) {
       score -= edgeAnomaly;
-      factors.push(`-${edgeAnomaly} (Edge AI Guardian: Local Anomaly Detected)`);
+      factors.push(`-${edgeAnomaly} (Sensor Guardian: Local Anomaly Detected)`);
     } else {
       score += 5;
-      factors.push(`+5 (Edge AI Guardian Active)`);
+      factors.push(`+5 (Sensor Guardian Active)`);
     }
   }
 
@@ -2325,6 +2325,17 @@ function calculateSafetyScore(hour, services, cameras, areaInfo, riskData = null
     } else if (riskData.confidence === 'high' || riskData.confidence === 'medium') {
       score += 3;
       factors.push('+3 (low recent public incident pressure)');
+    }
+  }
+
+  // Factor 11: NCRB published crime statistics (India only)
+  if (typeof getNcrbCrimeRate === 'function' && coords) {
+    const ncrbData = getNcrbCrimeRate(coords.lat, coords.lng);
+    if (ncrbData) {
+      score += ncrbData.safetyModifier;
+      const direction = ncrbData.safetyModifier >= 0 ? '+' : '';
+      const levelLabel = ncrbData.level === 'city' ? ncrbData.name : (ncrbData.level === 'state' ? `${ncrbData.name} state` : 'India avg');
+      factors.push(`${direction}${ncrbData.safetyModifier} (NCRB ${ncrbData.dataYear}: ${levelLabel} crime rate ${ncrbData.riskIndex}× national avg)`);
     }
   }
 
@@ -2402,7 +2413,7 @@ function generateRiskFactors(hour, services, cameras, areaInfo, riskData = null)
       }
 
       if (detections > 0) {
-        features.push(`YOLOv8 simulation processed ${detections} scene detections`);
+        features.push(`Scene simulation processed ${detections} detections`);
       }
 
       if (Array.isArray(riskData.cvSignals.signals) && riskData.cvSignals.signals.length > 0) {

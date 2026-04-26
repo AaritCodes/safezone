@@ -90,7 +90,7 @@
     <div class="legend-item"><div class="legend-color" style="background: #eab308;"></div> Moderate (60-79)</div>
     <div class="legend-item"><div class="legend-color" style="background: #f97316;"></div> Use Caution (40-59)</div>
     <div class="legend-item"><div class="legend-color" style="background: #ef4444;"></div> High Risk (0-39)</div>
-    <div class="legend-note">Note: Heatmap shows estimated risk patterns, not actual crime data</div>
+    <div class="legend-note">⚠ Heatmap shows time-based estimated patterns — not crime statistics. Safety score uses NCRB published crime rates where available.</div>
   </div>
 
   <!-- Map -->
@@ -197,10 +197,10 @@
     </div>
   </div>
 
-  <!-- Edge AI Guardian Tab -->
+  <!-- Sensor Guardian Tab -->
   <div class="edge-ai-panel">
-    <button id="edgeAIBtn" class="edge-ai-btn" onclick="toggleEdgeAI()" aria-label="Toggle Edge AI Sensor Fusion">
-      🛡️ Enable Edge AI
+    <button id="edgeAIBtn" class="edge-ai-btn" onclick="toggleEdgeAI()" aria-label="Toggle on-device sensor guardian">
+      🛡️ Sensor Guardian
     </button>
   </div>
 
@@ -210,6 +210,7 @@
   <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
   <!-- App Scripts -->
   <script src="edge-ai.js"></script>
+  <script src="ncrb-data.js"></script>
   <script src="data.js"></script>
   <script src="app.js"></script>
 

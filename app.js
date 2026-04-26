@@ -986,7 +986,7 @@ function refreshSelectedSidebar() {
   if (!selectedMarker || !lastFetchedServices || !lastAreaInfo) return;
 
   const pos = selectedMarker.getLatLng();
-  const scoreData = calculateSafetyScore(currentHour, lastFetchedServices, lastFetchedCameras, lastAreaInfo, lastRiskData);
+  const scoreData = calculateSafetyScore(currentHour, lastFetchedServices, lastFetchedCameras, lastAreaInfo, lastRiskData, { lat: pos.lat, lng: pos.lng });
   const level = getSafetyLevel(scoreData.score);
   const riskOutput = generateRiskFactors(currentHour, lastFetchedServices, lastFetchedCameras, lastAreaInfo, lastRiskData);
 
@@ -1279,8 +1279,8 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
     <div class="data-disclaimer info" role="status">
       <span class="disclaimer-icon">ℹ️</span>
       <div>
-        <div class="disclaimer-title">Safety Score Disclaimer</div>
-        <div class="disclaimer-text">This score is an estimate based on available data and should not be the sole factor in safety decisions. Always use your judgment and local knowledge.</div>
+        <div class="disclaimer-title">How This Score Works</div>
+        <div class="disclaimer-text">Based on emergency service proximity, surveillance coverage, time-of-day risk, and <strong>NCRB published crime rates</strong> (where available). This is an estimate — not an official safety rating. Always use your own judgment.</div>
       </div>
     </div>
 
@@ -1364,11 +1364,59 @@ function updateSidebar(score, level, areaInfo, services, cameras, risks, feature
         </div>
         ${riskReliability !== null ? `<div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Estimated data reliability: ${riskReliability}%${crimeQuality !== null ? ` • Crime quality ${crimeQuality}%` : ''}${accidentQuality !== null ? ` • Accident quality ${accidentQuality}%` : ''}${cvQuality !== null ? ` • CV quality ${cvQuality}%` : ''}</div>` : ''}
         ${productScore !== null ? `<div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Product-grade score: ${productScore}/100 via ${escapeHtml(productModel)}${deploymentGrade ? ` • ${escapeHtml(deploymentGrade)}` : ''}</div>` : ''}
-        ${cvRiskScore !== null ? `<div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">YOLOv8 simulated CV risk: ${cvRiskScore}/100 (${escapeHtml(cvRiskLevel)}) • CV source: ${escapeHtml(cvSourceLabel)}</div>` : ''}
+        ${cvRiskScore !== null ? `<div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Simulated scene risk: ${cvRiskScore}/100 (${escapeHtml(cvRiskLevel)}) • Source: ${escapeHtml(cvSourceLabel)}</div>` : ''}
         ${riskData && Array.isArray(riskData.recommendations) && riskData.recommendations.length > 0 ? `<div style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">Recommendation: ${escapeHtml(riskData.recommendations[0])}</div>` : ''}
         ${usesProxyRisk ? '<div style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">Using civic proxy signals for areas without official open crime APIs.</div>' : ''}
       </div>
     ` : ''}
+
+    ${(function() {
+      if (typeof getNcrbCrimeRate !== 'function') return '';
+      const ncrbResult = getNcrbCrimeRate(safeLat, safeLng);
+      if (!ncrbResult) return '';
+      const r = ncrbResult.rates;
+      const riskColor = ncrbResult.riskIndex > 2.0 ? '#ef4444' :
+        ncrbResult.riskIndex > 1.3 ? '#f97316' :
+        ncrbResult.riskIndex > 0.9 ? '#eab308' : '#22c55e';
+      return `
+        <div class="section">
+          <div class="section-title"><span class="icon">📊</span> NCRB Crime Statistics</div>
+          <div style="background: rgba(99,102,241,0.08); border: 1px solid rgba(99,102,241,0.18); border-radius: 12px; padding: 14px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+              <div>
+                <div style="font-size: 14px; font-weight: 600; color: var(--text-primary);">${escapeHtml(ncrbResult.name)}</div>
+                <div style="font-size: 11px; color: var(--text-muted);">${escapeHtml(ncrbResult.level)}-level data • ${ncrbResult.dataYear}</div>
+              </div>
+              <div style="text-align: right;">
+                <div style="font-size: 18px; font-weight: 700; color: ${riskColor};">${ncrbResult.riskIndex}×</div>
+                <div style="font-size: 10px; color: var(--text-muted);">vs national avg</div>
+              </div>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px;">
+              <div style="text-align: center; padding: 6px; background: rgba(0,0,0,0.15); border-radius: 8px;">
+                <div style="font-size: 14px; font-weight: 600; color: var(--text-primary);">${r.theft}</div>
+                <div style="font-size: 9px; color: var(--text-muted);">Theft/lakh</div>
+              </div>
+              <div style="text-align: center; padding: 6px; background: rgba(0,0,0,0.15); border-radius: 8px;">
+                <div style="font-size: 14px; font-weight: 600; color: var(--text-primary);">${r.robbery}</div>
+                <div style="font-size: 9px; color: var(--text-muted);">Robbery/lakh</div>
+              </div>
+              <div style="text-align: center; padding: 6px; background: rgba(0,0,0,0.15); border-radius: 8px;">
+                <div style="font-size: 14px; font-weight: 600; color: var(--text-primary);">${r.assault}</div>
+                <div style="font-size: 9px; color: var(--text-muted);">Assault/lakh</div>
+              </div>
+            </div>
+            <div style="font-size: 10px; color: var(--text-muted); line-height: 1.4;">
+              Total IPC rate: ${r.total}/lakh • National avg: ${ncrbResult.nationalAverage.total}/lakh<br>
+              Source: ${escapeHtml(ncrbResult.attribution)}
+            </div>
+            <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px; font-style: italic;">
+              ⚠ Rates reflect registered FIRs. Higher rates may indicate better reporting, not necessarily more danger.
+            </div>
+          </div>
+        </div>
+      `;
+    })()}
 
     <div class="section">
       <div class="section-title"><span class="icon">🚑</span> Emergency Readiness</div>
@@ -1662,7 +1710,7 @@ function findSafestHomes() {
   let bestScore = -1;
 
   lastFetchedProperties.forEach(prop => {
-    const scoreData = calculateSafetyScore(currentHour, lastFetchedServices, lastFetchedCameras, lastAreaInfo, lastRiskData);
+    const scoreData = calculateSafetyScore(currentHour, lastFetchedServices, lastFetchedCameras, lastAreaInfo, lastRiskData, { lat: prop.lat, lng: prop.lng });
     let propScore = scoreData.score;
 
     const policeDist = lastFetchedServices.police.length > 0
@@ -2190,7 +2238,7 @@ function getRouteMobilityInsight(route, congestion, mode, edgeAiSignal = { activ
   }
 
   if (edgeAiSignal.active && edgeScore > 0) {
-    detailParts.push(`Edge AI signal is active with a ${edgeScore}/100 anomaly score.`);
+    detailParts.push(`Sensor Guardian is active with a ${edgeScore}/100 anomaly score.`);
   }
 
   const factorList = [];
@@ -2199,7 +2247,7 @@ function getRouteMobilityInsight(route, congestion, mode, edgeAiSignal = { activ
   }
 
   if (edgeAiSignal.active) {
-    factorList.push(`Edge AI anomaly bias: ${edgeScore}/100`);
+    factorList.push(`Sensor anomaly bias: ${edgeScore}/100`);
   }
 
   return {
@@ -2551,7 +2599,7 @@ function renderDirectionsPanel(route, destinationLabel) {
   const actionSummary = shouldSwitch
     ? `Switch to ${recommendedCandidate.label} to save about ${formatDuration(etaGainSeconds)}.`
     : 'Stay on the current route. It is already the best option right now.';
-  const actionMeta = `${getRouteRefreshAgeLabel()} • Edge AI ${edgeAiSignal.active ? 'active' : 'inactive'}`;
+  const actionMeta = `${getRouteRefreshAgeLabel()} • Sensor Guardian ${edgeAiSignal.active ? 'active' : 'inactive'}`;
 
   const stepsMarkup = (Array.isArray(activeCandidate.steps) ? activeCandidate.steps : []).slice(0, 20).map((step, idx) => `
     <div class="direction-step" id="route-step-${idx}">
@@ -3013,7 +3061,7 @@ async function toggleEdgeAI() {
     btn.innerHTML = '🛡️ Guardian Active<div class="pulse-ring"></div>';
   } else {
     btn.classList.remove('active');
-    btn.innerHTML = '🛡️ Enable Edge AI';
+    btn.innerHTML = '🛡️ Sensor Guardian';
   }
 }
 

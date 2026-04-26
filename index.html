@@ -94,7 +94,9 @@
   </div>
 
   <!-- Map -->
-  <div id="map"></div>
+  <div id="map">
+    <div id="heatmapBadge" style="position: absolute; top: 10px; right: 10px; z-index: 1000; background: rgba(0,0,0,0.6); color: white; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; pointer-events: none; display: none;">Simulated pattern</div>
+  </div>
 
   <!-- Sidebar -->
   <div id="sidebar" class="sidebar" role="complementary" aria-label="Safety report panel">
@@ -211,8 +213,7 @@
   <!-- App Scripts -->
   <script src="edge-ai.js"></script>
   <script src="ncrb-data.js"></script>
-  <script src="data.js"></script>
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 
 </body>
 </html>

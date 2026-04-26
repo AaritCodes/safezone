@@ -8,12 +8,16 @@ const {
   normalizeAndRankHotspots,
   getCrimeSignalReliability,
   trainRiskModel,
-  calculateSafetyScore,
-  optimizeRouteAlternatives,
+  optimizeRouteAlternatives
+} = require('./js/modules/api.js');
+
+const { calculateSafetyScore } = require('./js/modules/scoring.js');
+
+const {
   getGoogleApiKey,
   hasGoogleApiKey,
   getBackendApiKey
-} = require('./data.js');
+} = require('./js/modules/config.js');
 
 const {
   CACHE_NAME,

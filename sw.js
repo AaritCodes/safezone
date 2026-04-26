@@ -1,11 +1,11 @@
-const CACHE_NAME = 'safezone-shell-v3';
+const CACHE_NAME = 'safezone-shell-v4';
 const APP_SHELL = [
   './',
   './index.html',
   './style.css',
   './edge-ai.css',
   './app.js',
-  './data.js',
+  './ncrb-data.js',
   './edge-ai.js',
   './manifest.json',
   './icon.svg'
@@ -17,7 +17,7 @@ const CACHEABLE_PATH_SUFFIXES = new Set([
   '/style.css',
   '/edge-ai.css',
   '/app.js',
-  '/data.js',
+  '/ncrb-data.js',
   '/edge-ai.js',
   '/manifest.json',
   '/icon.svg'

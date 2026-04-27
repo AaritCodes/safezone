@@ -1,11 +1,26 @@
 import { state } from './state.js';
 import { calculateSafetyScore, getSafetyLevel, generateRiskFactors } from './scoring.js';
-import { formatTime, formatDistance, escapeHtml, escapeJsString, stripHtmlTags, normalizeDisplayText, sanitizePhoneNumber, formatDuration } from './utils.js';
+import { formatTime, formatDistance, escapeHtml, escapeJsString, stripHtmlTags, normalizeDisplayText, sanitizePhoneNumber, formatDuration, isValidPhoneNumber, safeMapCoordinate, withTimeoutFallback, formatIncidentSourceLabel } from './utils.js';
 import { showStatus, showNotification } from './notifications.js';
-import { getBackendApiKey, getGoogleApiKey, buildBackendApiUrl, SCAN_SOFT_DEADLINE_MS, MOBILITY_REFRESH_INTERVAL_MS, MOBILITY_NOTIFICATION_COOLDOWN_MS, MOBILITY_SWITCH_MIN_GAIN_SECONDS } from './config.js';
-import { updateHeatmap, drawRoute, clearRouteDrawing, initMap } from './map.js';
-import { persistStoredArray } from './storage.js';
-import { fetchBackendSafetyAssessment, fetchGoogleDirections, optimizeRouteAlternatives, buildRouteBundle, getDistance, mapOsrmRouteCandidate, getHeatmapData } from './api.js';
+import { getBackendApiKey, getGoogleApiKey, buildBackendApiUrl, SCAN_SOFT_DEADLINE_MS, MOBILITY_REFRESH_INTERVAL_MS, MOBILITY_NOTIFICATION_COOLDOWN_MS, MOBILITY_SWITCH_MIN_GAIN_SECONDS, MAX_FAVORITES, MAX_EMERGENCY_CONTACTS } from './config.js';
+import { updateHeatmap, drawRoute, clearRouteDrawing, initMap, updateEmergencyMarkers, updateCameraMarkers, updatePropertyMarkers, updateRiskMarkers } from './map.js';
+import { persistStoredArray, persistFavoriteLocations, persistEmergencyContacts } from './storage.js';
+import { 
+  fetchBackendSafetyAssessment, 
+  fetchGoogleDirections, 
+  optimizeRouteAlternatives, 
+  buildRouteBundle, 
+  getDistance, 
+  mapOsrmRouteCandidate, 
+  getHeatmapData,
+  fetchNearbyAmenities,
+  fetchNearbyCameras,
+  fetchNearbyProperties,
+  reverseGeocode,
+  fetchPublicSafetyRisk,
+  EMERGENCY_NUMBERS,
+  mergeRiskDataWithBackendAssessment
+} from './api.js';
 export
 // ── Load Area Data from APIs (Progressive) ───────────────────
 async function loadAreaData(lat, lng) {

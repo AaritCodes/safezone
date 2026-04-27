@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { getGoogleApiKey, buildBackendApiUrl, getBackendApiKey } from './config.js';
+import { getGoogleApiKey, buildBackendApiUrl, getBackendApiKey, MAP_CENTER } from './config.js';
 import { calculateSafetyScore, getSafetyLevel, clampRiskValue } from './scoring.js';
 import { safeMapCoordinate, stripHtmlTags } from './utils.js';
 
@@ -994,7 +994,7 @@ export function generateFallbackServices(lat, lng) {
   }
   return services;
 } // ── Nearby Surveillance Signals (Strictly Overpass API) ──────────────────────
-export async function fetchNearbyCameras(lat, lng, radius = 2000) {
+export async function fetchNearbyCameras(lat, lng, radius = 1000) {
   const query = `
     [out:json][timeout:5];
     (
@@ -1770,7 +1770,7 @@ export async function fetchAccidentRiskSignals(lat, lng, radius = 2000) {
     };
   }
 }
-export async function fetchPublicSafetyRisk(lat, lng) {
+export async function fetchPublicSafetyRisk(lat, lng, radius = 2500) {
   try {
     const [crimeData, accidentData] = await Promise.all([fetchRecentCrimeSignals(lat, lng), fetchAccidentRiskSignals(lat, lng)]);
     const crimeFeedFailed = Boolean(crimeData.error);
@@ -2415,7 +2415,7 @@ export function getHeatmapData(hour, center = MAP_CENTER, span = 0.05) {
   }
   return points;
 } // ── Mock Broker API (Real Estate Integration) ───────────────────
-export async function fetchNearbyProperties(lat, lng, radius = 2000) {
+export async function fetchNearbyProperties(lat, lng, radius = 1200) {
   // Keep a small delay so cards still feel dynamic without blocking the sidebar.
   await new Promise(r => setTimeout(r, 120 + Math.random() * 160));
   const properties = [];

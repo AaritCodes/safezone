@@ -88,3 +88,11 @@ export function initStorage() {
   state.favoriteLocations = loadFavoriteLocations();
   state.emergencyContacts = loadEmergencyContacts();
 }
+
+export function persistFavoriteLocations() {
+  persistStoredArray(FAVORITES_STORAGE_KEY, state.favoriteLocations);
+}
+
+export function persistEmergencyContacts() {
+  persistStoredArray(CONTACTS_STORAGE_KEY, state.emergencyContacts);
+}

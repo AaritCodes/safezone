@@ -1,12 +1,30 @@
 import { state } from './state.js';
-import { formatTime, formatDistance, escapeHtml, escapeJsString, formatIncidentSourceLabel } from './utils.js';
+import { formatTime, formatDistance, escapeHtml, escapeJsString, formatIncidentSourceLabel, safeMapCoordinate, withTimeoutFallback } from './utils.js';
 import { calculateSafetyScore } from './scoring.js';
-import { refreshSelectedSidebar } from './ui.js';
-import { fetchBackendSafetyAssessment } from './api.js';
+import { 
+  refreshSelectedSidebar, 
+  loadAreaData, 
+  showSidebarLoading, 
+  openSidebar, 
+  updateTimeDisplay, 
+  getCongestionClass 
+} from './ui.js';
+import { 
+  fetchBackendSafetyAssessment, 
+  fetchNearbyAmenities, 
+  fetchNearbyCameras, 
+  fetchNearbyProperties, 
+  reverseGeocode, 
+  fetchPublicSafetyRisk,
+  getDistance,
+  getHeatmapData
+} from './api.js';
+import { enrichRiskDataWithBackendAssessment } from './ui.js';
 import { showStatus, showNotification } from './notifications.js';
-export
+import { MAP_CENTER, MAP_ZOOM, SCAN_CALL_TIMEOUT_MS, SCAN_SOFT_DEADLINE_MS } from './config.js';
+
 // ── Initialize Map ────────────────────────────────────────────
-function initMap() {
+export function initMap() {
   state.map = L.map('map', {
     center: MAP_CENTER,
     zoom: MAP_ZOOM,
@@ -62,10 +80,8 @@ function initMap() {
   }
 }
 
-// ── Load Area Data from APIs (Progressive) ───────────────────
-export
 // ── Heatmap Layer ─────────────────────────────────────────────
-function initHeatmap() {
+export function initHeatmap() {
   const data = getHeatmapData(state.currentHour, state.currentMapCenter);
   state.heatLayer = L.heatLayer(data, {
     radius: 35,
@@ -240,31 +256,9 @@ export function updateRiskMarkers(riskData) {
   });
   if (!state.layerState.risk) state.map.removeLayer(state.riskLayerGroup);
 }
-export function withTimeoutFallback(promise, timeoutMs, fallbackValue, label = 'request') {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const timeoutId = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      console.warn(`${label} timed out after ${timeoutMs}ms`);
-      resolve(typeof fallbackValue === 'function' ? fallbackValue() : fallbackValue);
-    }, timeoutMs);
-    promise.then(value => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeoutId);
-      resolve(value);
-    }).catch(error => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeoutId);
-      reject(error);
-    });
-  });
-}
-export
+
 // ── Map Click Handler ─────────────────────────────────────────
-async function onMapClick(e) {
+export async function onMapClick(e) {
   const {
     lat,
     lng

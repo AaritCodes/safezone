@@ -7,7 +7,7 @@ import { initStorage } from './js/modules/storage.js';
 import * as config from './js/modules/config.js';
 import * as api from './js/modules/api.js';
 import * as ui from './js/modules/ui.js';
-import * as mapMod from './js/modules/map.js';
+import * as mapMod from './js/modules/map.js?v=20260427a';
 
 // Several modules still reference shared helpers as globals.
 Object.assign(window, config, api, ui, mapMod);

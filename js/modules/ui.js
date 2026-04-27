@@ -7,7 +7,7 @@ import { updateHeatmap, drawRoute, clearRouteDrawing, initMap, updateEmergencyMa
 import { persistStoredArray, persistFavoriteLocations, persistEmergencyContacts } from './storage.js';
 import { 
   fetchBackendSafetyAssessment, 
-  fetchGoogleDirections, 
+  fetchRouteDirections, 
   optimizeRouteAlternatives, 
   buildRouteBundle, 
   getDistance, 

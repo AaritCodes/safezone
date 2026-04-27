@@ -6,7 +6,7 @@ import { state } from './js/modules/state.js';
 import { initStorage } from './js/modules/storage.js';
 import * as config from './js/modules/config.js';
 import * as api from './js/modules/api.js';
-import * as ui from './js/modules/ui.js';
+import * as ui from './js/modules/ui.js?v=20260427c';
 import * as mapMod from './js/modules/map.js?v=20260427a';
 
 // Several modules still reference shared helpers as globals.

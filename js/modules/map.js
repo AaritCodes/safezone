@@ -54,29 +54,40 @@ export function initMap() {
   slider.setAttribute('aria-valuemax', '23');
   slider.setAttribute('aria-valuenow', state.currentHour);
   updateTimeDisplay();
-  const hideLoading = () => {
+  const loadingOverlay = document.getElementById('loadingOverlay');
+  let loadingHidden = false;
+  const hideLoading = (delayMs = 120) => {
+    if (loadingHidden) return;
+    loadingHidden = true;
     setTimeout(() => {
-      document.getElementById('loadingOverlay').classList.add('hidden');
-    }, 500);
+      if (loadingOverlay) {
+        loadingOverlay.classList.add('hidden');
+      }
+    }, delayMs);
   };
+
+  // Render the map shell immediately. Data hydration continues in the background.
+  hideLoading(120);
+
   if (navigator.geolocation) {
     navigator.geolocation.getCurrentPosition(position => {
       const userLat = position.coords.latitude;
       const userLng = position.coords.longitude;
       state.map.setView([userLat, userLng], MAP_ZOOM);
       loadAreaData(userLat, userLng);
-      hideLoading();
+      hideLoading(0);
     }, error => {
       console.warn('Geolocation failed or denied. Falling back to default.', error);
       loadAreaData(MAP_CENTER[0], MAP_CENTER[1]);
-      hideLoading();
+      hideLoading(0);
     }, {
-      timeout: 10000,
-      maximumAge: 0
+      timeout: 4500,
+      maximumAge: 300000,
+      enableHighAccuracy: false
     });
   } else {
     loadAreaData(MAP_CENTER[0], MAP_CENTER[1]);
-    hideLoading();
+    hideLoading(0);
   }
 }
 

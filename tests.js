@@ -101,10 +101,12 @@ describe('SafeZone Production Logic', () => {
   describe('Risk Core: reliability and model training', () => {
     test('official police feeds score higher reliability than proxy/model sources', () => {
       const indiaPolice = getCrimeSignalReliability({ source: 'india-police-data', total: 70, coverage: 1 });
+      const realtime = getCrimeSignalReliability({ source: 'realtime-crime-api', total: 70, coverage: 1 });
       const proxy = getCrimeSignalReliability({ source: 'osm-civic-risk-proxy', total: 40, coverage: 1 });
       const model = getCrimeSignalReliability({ source: 'model-derived-risk-proxy', total: 10, coverage: 0.2 });
 
       expect(indiaPolice).toBeGreaterThan(proxy);
+      expect(realtime).toBeGreaterThan(proxy);
       expect(proxy).toBeGreaterThan(model);
     });
 

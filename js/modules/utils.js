@@ -102,6 +102,7 @@ export function formatIncidentSourceLabel(source) {
   const s = source.toLowerCase();
   if (s.includes('google')) return 'Google Intelligence';
   if (s.includes('osm') || s.includes('openstreetmap')) return 'OSM Community Signals';
+  if (s.includes('realtime') && s.includes('crime')) return 'Realtime Crime API';
   if (s.includes('estimated') || s.includes('proxy')) return 'Regional Risk Proxy';
   if (s.includes('backend')) return 'SafeZone Backend';
   return source.charAt(0).toUpperCase() + source.slice(1);

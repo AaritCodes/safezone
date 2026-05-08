@@ -1192,6 +1192,13 @@ export function getCrimeSignalReliability(crimeData) {
     return clampRiskValue(baseReliability + scale * 0.20, baseReliability, baseReliability + 0.20);
   }
 
+  // Realtime crime feed (backend proxy)
+  if (crimeData.source === 'realtime-crime-api') {
+    const scale = clampRiskValue(total / 80, 0.2, 1);
+    const baseReliability = 0.76;
+    return clampRiskValue(baseReliability + scale * 0.18, baseReliability, baseReliability + 0.18);
+  }
+
   // OSM civic proxy (amenity-based risk scoring)
   if (crimeData.source === 'osm-civic-risk-proxy') {
     return clampRiskValue(0.42 + coverage * 0.36, 0.42, 0.78);
@@ -1215,7 +1222,11 @@ export function getAccidentSignalReliability(accidentData) {
 }
 export function getRiskConfidenceLabel(combinedReliability, crimeData) {
   const reliability = clampRiskValue(combinedReliability, 0, 1);
-  const hasDirectCrimeFeed = Boolean(crimeData && (crimeData.source === 'india-police-data' || crimeData.source === 'india-police-karnataka') && !crimeData.error);
+  const hasDirectCrimeFeed = Boolean(
+    crimeData &&
+    (crimeData.source === 'india-police-data' || crimeData.source === 'india-police-karnataka' || crimeData.source === 'realtime-crime-api') &&
+    !crimeData.error
+  );
   if (hasDirectCrimeFeed && reliability >= 0.74) return 'high';
   if (reliability >= 0.68) return 'high';
   if (reliability >= 0.42) return 'medium';
@@ -1490,31 +1501,54 @@ export function trainRiskModel(crimeData, accidentData, reliability = 0.5) {
     reliability: Number((reliabilityWeight * 100).toFixed(1))
   };
 }
-export async function fetchIndiaCrimeData(lat, lng, state = 'india') {
-  // India Police data integration
-  // Currently uses public FIR/crime statistics with geo-clustering
-  // Future: Integrate with state police API (Karnataka Police, etc.)
-  // 
-  // Available public data sources:
-  // - Crime in India Statistics (https://crime-in-india.github.io/)
-  // - State Police FIR portals
-  // - NCRB (National Crime Records Bureau) data
+export async function fetchRealtimeCrimeFromBackend(lat, lng, state = 'india') {
+  const endpoint = buildBackendApiUrl('/api/crime/realtime');
+  if (!endpoint) return null;
 
+  const base = typeof window !== 'undefined' && window.location && window.location.href
+    ? window.location.href
+    : 'https://safezone.local';
+  const url = new URL(endpoint, base);
+  url.searchParams.set('lat', Number(lat).toFixed(6));
+  url.searchParams.set('lng', Number(lng).toFixed(6));
+  url.searchParams.set('radius', String(RISK_SIGNAL_MAX_RADIUS_METERS));
+  if (state) url.searchParams.set('state', String(state));
+
+  const backendApiKey = getBackendApiKey();
+  const headers = {};
+  if (backendApiKey) {
+    headers['x-api-key'] = backendApiKey;
+  }
+
+  try {
+    const response = await fetchWithTimeout(url.toString(), { headers }, 5200);
+    if (!response.ok) {
+      return null;
+    }
+    const data = await parseGoogleJsonResponse(response);
+    if (!data || data.status !== 'ok') {
+      return null;
+    }
+    const incidents = Array.isArray(data.incidents) ? data.incidents : null;
+    if (!incidents) return null;
+    return {
+      incidents,
+      source: data.source || 'realtime-crime-api'
+    };
+  } catch (err) {
+    console.warn('Realtime crime feed failed, using fallback:', err);
+    return null;
+  }
+}
+export async function fetchIndiaCrimeData(lat, lng, state = 'india') {
   const isKarnataka = isLikelyKarnataka(lat, lng);
   try {
-    // Attempt to fetch from India Police API (placeholder for integration)
-    // This can be replaced with actual state police API endpoints
-    let apiUrl = null;
-    if (isKarnataka) {
-      // Karnataka Police FIR/Crime API (if available)
-      apiUrl = `https://bangalore-police.api/crimes/geo?lat=${lat}&lng=${lng}&state=karnataka`;
-    } else {
-      // All-India crime statistics API
-      apiUrl = `https://india-police.api/crimes/geo?lat=${lat}&lng=${lng}`;
+    const realtime = await fetchRealtimeCrimeFromBackend(lat, lng, state);
+    if (realtime && Array.isArray(realtime.incidents)) {
+      return processCrimeData(realtime.incidents, lat, lng, 'realtime-crime-api');
     }
 
     // Fallback to synthetic crime data based on NCRB statistics and geographic clustering
-    // This creates realistic crime distributions without actual API
     const syntheticCrimes = generateIndiaCrimeSynthetic(lat, lng, isKarnataka);
     return processCrimeData(syntheticCrimes, lat, lng, isKarnataka ? 'karnataka' : 'india');
   } catch (err) {
@@ -1606,6 +1640,16 @@ export function processCrimeData(crimes, lat, lng, source) {
   let weightedViolent = 0;
   let weightedTotal = 0;
   let locatedReports = 0;
+  const sourceKey = source === 'realtime-crime-api'
+    ? 'realtime-crime-api'
+    : source === 'karnataka'
+      ? 'india-police-karnataka'
+      : 'india-police-data';
+  const sourceLabel = sourceKey === 'realtime-crime-api'
+    ? 'Realtime Crime API'
+    : sourceKey === 'india-police-karnataka'
+      ? 'Karnataka Police Data'
+      : 'India Police Data';
   const hotspotCandidates = [];
   crimeRows.forEach(crime => {
     const crimeLat = Number(crime && crime.latitude);
@@ -1631,7 +1675,7 @@ export function processCrimeData(crimes, lat, lng, source) {
         lng: crimeLng,
         title: crimeLabel + ipcSection,
         type: isTheft ? 'theft' : isViolent ? 'violent' : 'crime',
-        source: source === 'karnataka' ? 'Karnataka Police Data' : 'India Police Data',
+        source: sourceLabel,
         severity: combinedWeight * (isViolent ? 2.1 : isTheft ? 1.75 : 1.05)
       });
     }
@@ -1641,7 +1685,6 @@ export function processCrimeData(crimes, lat, lng, source) {
   const total = Math.max(theftCount + violentCount, Math.round(weightedTotal));
   const month = crimeRows[0] && crimeRows[0].month ? crimeRows[0].month : 'latest';
   const coverage = crimeRows.length > 0 ? clampRiskValue(locatedReports / crimeRows.length, 0, 1) : 0;
-  const sourceKey = source === 'karnataka' ? 'india-police-karnataka' : 'india-police-data';
   return {
     source: sourceKey,
     month,
@@ -1656,7 +1699,7 @@ export function processCrimeData(crimes, lat, lng, source) {
   };
 }
 export async function fetchRecentCrimeSignals(lat, lng) {
-  // India Police Data API is used as a public crime feed where coverage is available
+  // Realtime crime feed (backend proxy) is used where coverage is available
   if (!isLikelyIndia(lat, lng)) {
     return fetchRegionalCrimeProxySignals(lat, lng);
   }

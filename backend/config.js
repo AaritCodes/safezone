@@ -78,6 +78,18 @@ function readConfig() {
       fallbackToSimulation: parseBoolean(process.env.SAFEZONE_CV_FALLBACK_TO_SIMULATION, true),
       modelVersion: String(process.env.SAFEZONE_CV_MODEL_VERSION || 'yolov8-sim-v1').trim()
     },
+    realtimeCrime: {
+      enabled: parseBoolean(process.env.SAFEZONE_CRIME_REALTIME_ENABLED, true),
+      url: String(process.env.SAFEZONE_CRIME_REALTIME_URL || '').trim(),
+      urlTemplate: String(process.env.SAFEZONE_CRIME_REALTIME_URL_TEMPLATE || '').trim(),
+      apiKey: String(process.env.SAFEZONE_CRIME_REALTIME_API_KEY || '').trim(),
+      apiKeyHeader: String(process.env.SAFEZONE_CRIME_REALTIME_API_KEY_HEADER || 'Authorization').trim(),
+      apiKeyPrefix: String(process.env.SAFEZONE_CRIME_REALTIME_API_KEY_PREFIX || 'Bearer').trim(),
+      timeoutMs: parseInteger(process.env.SAFEZONE_CRIME_REALTIME_TIMEOUT_MS, 4500, 500, 30000),
+      defaultRadiusMeters: parseInteger(process.env.SAFEZONE_CRIME_REALTIME_RADIUS_METERS, 2600, 250, 30000),
+      lookbackDays: parseInteger(process.env.SAFEZONE_CRIME_REALTIME_LOOKBACK_DAYS, 30, 1, 365),
+      providerName: String(process.env.SAFEZONE_CRIME_REALTIME_PROVIDER || '').trim()
+    },
     alerting: {
       enabled: parseBoolean(process.env.SAFEZONE_ALERTING_ENABLED, false),
       webhookUrl: String(process.env.SAFEZONE_ALERTING_WEBHOOK_URL || '').trim(),

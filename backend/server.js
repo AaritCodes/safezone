@@ -23,6 +23,7 @@ const { analyzeCvScene } = require('./yolov8-inference');
 const { createAlertManager } = require('./alerting');
 const { createModelGovernance } = require('./model-governance');
 const { scoreSafetyContext } = require('./risk-engine');
+const { createRealtimeCrimeClient } = require('./realtime-crime');
 
 function buildCorsOptions(config) {
   const configuredOrigins = Array.isArray(config.cors.origins)
@@ -177,6 +178,9 @@ function createApp(runtime = {}) {
   const metrics = runtime.metrics || createMetricsStore();
   const alerting = runtime.alerting || createAlertManager(config.alerting, logger.child({ component: 'alerting' }));
   const governance = runtime.governance || createModelGovernance(config.governance, logger.child({ component: 'governance' }));
+  const realtimeCrime = createRealtimeCrimeClient(config.realtimeCrime, logger.child({ component: 'realtime-crime' }));
+  const { createLocalRouter } = require('./local-crime-api');
+  const localCrimeRouter = createLocalRouter({ dataDir: path.resolve(__dirname, '..', 'data') });
 
   const app = express();
   const staticRoot = path.resolve(__dirname, '..');
@@ -316,6 +320,55 @@ function createApp(runtime = {}) {
     res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
     res.send(metrics.toPrometheus());
   });
+
+  // Local NCRB-based crime proxy (useful for offline dev / local provider)
+  app.use('/local-crime', localCrimeRouter);
+
+  app.get('/api/crime/realtime', asyncHandler(async (req, res) => {
+    const lat = toFiniteNumber(req.query.lat, NaN);
+    const lng = toFiniteNumber(req.query.lng, NaN);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return res.status(400).json({
+        status: 'error',
+        code: 'INVALID_COORDS',
+        message: 'Query parameters lat and lng are required.',
+        requestId: req.requestId
+      });
+    }
+
+    const radius = toFiniteNumber(req.query.radius, config.realtimeCrime.defaultRadiusMeters);
+    const lookbackDays = toFiniteNumber(req.query.lookbackDays, config.realtimeCrime.lookbackDays);
+    const state = typeof req.query.state === 'string' ? req.query.state.trim() : '';
+    const result = await realtimeCrime.fetchIncidents({
+      lat,
+      lng,
+      radius,
+      lookbackDays,
+      state
+    });
+
+    if (!result.ok) {
+      return res.status(result.status || 503).json({
+        status: 'error',
+        code: result.code || 'UPSTREAM_ERROR',
+        message: result.message || 'Realtime crime feed failed.',
+        requestId: req.requestId
+      });
+    }
+
+    return res.json({
+      status: 'ok',
+      source: result.source,
+      incidents: result.incidents,
+      meta: {
+        provider: result.provider,
+        rawCount: result.rawCount,
+        normalizedCount: Array.isArray(result.incidents) ? result.incidents.length : 0,
+        fetchedAt: new Date().toISOString()
+      },
+      requestId: req.requestId
+    });
+  }));
 
   app.post('/api/cv/yolov8/simulate', createPayloadValidationMiddleware(validateCvSimulationPayload, metrics), (req, res) => {
     const payload = req.validatedPayload;

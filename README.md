@@ -537,6 +537,11 @@ npx jest tests.js --runInBand
 - **Usage**: City → state → national average fallback for safety scoring
 - **Important**: Rates reflect *registered* FIRs — higher rates may indicate better police reporting infrastructure
 
+### Realtime Crime Feed (Optional)
+- **Purpose**: Live incident feed via backend proxy (`/api/crime/realtime`)
+- **Config**: `SAFEZONE_CRIME_REALTIME_URL` or `SAFEZONE_CRIME_REALTIME_URL_TEMPLATE` plus optional API key env vars
+- **Fallback**: Synthetic NCRB-weighted events when realtime feed is unavailable
+
 ### Leaflet.js
 - **Purpose**: Interactive map rendering
 - **Version**: 1.9.4
